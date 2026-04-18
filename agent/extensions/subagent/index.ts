@@ -1,0 +1,1 @@
+/home/veer/.nvm/versions/node/v22.22.1/lib/node_modules/@mariozechner/pi-coding-agent/examples/extensions/subagent/index.ts
