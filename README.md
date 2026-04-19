@@ -1,13 +1,9 @@
 # pi-config
-Portable configuration for the **pi-coding-agent**.
+Minimal Portable configuration for the [**pi-coding-agent**.](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
 
 ## Features
-- **Auto-Compaction:** Managed context windows (triggers at 16k reserve).
-- **Subagent Swarm:** Includes `scout`, `planner`, `worker`, and `reviewer` agents.
-- **Custom Skills:** Includes `searxng-search` for local web searching.
-- **Optimized Models:** 
-  - Scout: `gemini-3-flash-preview`
-  - Planner/Worker: `gpt-5.3-codex`
+- **Subagents:** Includes `scout`, `planner`, `worker`, and `reviewer` agents via the pi agent extension
+- **Web search Skill:** Via `searxng` for local web searching.
 
 ## Installation
 
