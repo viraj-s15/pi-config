@@ -27,8 +27,9 @@ To use this configuration on a new system:
 3. **Restart your pi session.**
 
 ## Structure
-- `agent/settings.json`: Global settings (compaction, default models).
+- `agent/settings.json`: Global settings (theme and compaction/model defaults).
 - `agent/agents/`: Subagent definitions.
 - `agent/extensions/`: Custom extensions (e.g., subagent orchestration, ask-user, todos, sessions).
 - `agent/skills/`: Agent skills and capabilities.
+- `agent/themes/`: Custom themes (including `catppuccin`).
 - `agent/prompts/`: Workflow templates (slash commands).
