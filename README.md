@@ -4,6 +4,9 @@ Minimal Portable configuration for the [**pi-coding-agent**.](https://github.com
 ## Features
 - **Subagents:** Includes `scout`, `planner`, `worker`, and `reviewer` agents via the pi agent extension
 - **Web search Skill:** Via `searxng` for local web searching.
+- **ask_user tool:** Structured question/clarification helper (from `ask-user` extension)
+- **Todos tool:** File-backed task tracking via `/todos` UI and `todo` tool
+- **Sessions command:** `/sessions` for quick project session switching
 
 ## Installation
 
@@ -26,6 +29,6 @@ To use this configuration on a new system:
 ## Structure
 - `agent/settings.json`: Global settings (compaction, default models).
 - `agent/agents/`: Subagent definitions.
-- `agent/extensions/`: Custom extensions (e.g., subagent orchestration).
+- `agent/extensions/`: Custom extensions (e.g., subagent orchestration, ask-user, todos, sessions).
 - `agent/skills/`: Agent skills and capabilities.
 - `agent/prompts/`: Workflow templates (slash commands).
