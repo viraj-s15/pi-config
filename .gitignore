@@ -1,3 +1,4 @@
 agent/auth.json
 agent/sessions/
 agent/extensions/*/node_modules/
+.pi/todos/

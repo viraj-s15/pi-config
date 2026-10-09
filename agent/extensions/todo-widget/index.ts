@@ -7,6 +7,7 @@
  *   ⠋  yellow pill       in progress (claimed by a session, or status in-progress/doing/working/wip)
  *   ○  plain muted text  not started
  *
+ * Right corner of the first line: purple "N subagents" pill while subagents are running.
  * One line by default; Ctrl+Shift+E (or /todo-widget expand|collapse) shows one row per todo.
  * Done todos only show if they were finished during this session. When every todo is done the
  * list stays for a few seconds, then disappears (those todos are not shown again). Command: /todo-widget [on|off]
@@ -23,6 +24,7 @@ const P = {
 	blue: [0x78, 0xa9, 0xff] as RGB,
 	green: [0x42, 0xbe, 0x65] as RGB,
 	yellow: [0xf1, 0xc2, 0x1b] as RGB, // carbon yellow30
+	purple: [0xbe, 0x95, 0xff] as RGB,
 	text: [0xdd, 0xe1, 0xe6] as RGB,
 	muted: [0x8d, 0x91, 0x99] as RGB,
 	subtle: [0x4d, 0x51, 0x59] as RGB,
@@ -148,6 +150,7 @@ class TodoWidget {
 	running = false;
 	frame = 0;
 	expanded = false; // false: one line, true: one row per todo
+	subagents = 0; // running subagents, shown as a pill at the right end of the first line
 	hideAt?: number; // set while every todo is done: the list disappears at this time
 	private timer?: ReturnType<typeof setInterval>;
 	constructor(
@@ -211,7 +214,22 @@ class TodoWidget {
 	}
 
 	render(width: number): string[] {
-		if (!this.items.length || width < 20) return [];
+		if (width < 20) return [];
+		if (this.subagents <= 0) return this.renderTodos(width);
+
+		// subagent pill sits in the right corner of the first line
+		const label = `\uF0C0 ${this.subagents} subagent${this.subagents === 1 ? "" : "s"}`;
+		const sub = pill(P.purple, P.ink, label, true);
+		const subW = visibleWidth(sub);
+		const lines = this.renderTodos(width - subW - 1);
+		const first = lines[0] ?? "";
+		const pad = " ".repeat(Math.max(1, width - subW - visibleWidth(first)));
+		lines[0] = truncateToWidth(first + pad + sub, width);
+		return lines;
+	}
+
+	private renderTodos(width: number): string[] {
+		if (!this.items.length) return [];
 		const { shown, hidden } = pickVisible(this.items);
 		const done = this.items.filter((t) => t.state === "done").length;
 		const lines: string[] = [];
@@ -288,6 +306,13 @@ export default function (pi: ExtensionAPI) {
 		widget = undefined;
 		if (ctx.hasUI) ctx.ui.setWidget("todo-widget", undefined);
 	};
+
+	// subagent extension publishes how many are running; we draw it at the right corner
+	pi.events.on("subagents:count", (n) => {
+		if (!widget) return;
+		widget.subagents = Number(n) || 0;
+		rerender?.();
+	});
 
 	pi.on("session_start", (_e, ctx) => {
 		sessionStart = Date.now();

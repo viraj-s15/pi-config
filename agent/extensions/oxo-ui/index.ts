@@ -1,7 +1,7 @@
 /**
  * oxo-ui: oxocarbon-grey styled input editor + powerlevel10k style footer.
  *
- * - Editor: rounded box (╭ ╮ ╰ ╯) with a solid rose border.
+ * - Editor: thick blue top/bottom rules (no side bars) and a ❯ arrow before the input.
  * - Footer: powerlevel10k "rainbow" style with rounded caps (needs a Nerd Font):
  *     left : status, dir, git (branch, ahead/behind, +staged !modified ?untracked)
  *     right: extension statuses, cache hit %, cost, t/s, context tokens, model + thinking
@@ -39,7 +39,9 @@ const RESET = "\x1b[0m";
 const fg = ([r, g, b]: RGB, s: string) => `\x1b[38;2;${r};${g};${b}m${s}${RESET}`;
 
 // ---------- editor border colors (change these to taste) ----------
-const BORDER = P.rose;
+const BORDER = P.blue;
+const RULE = "━"; // heavy line; use "─" for a thin one
+const ARROW = "❯";
 const BASH_BORDER = P.teal;
 
 const ANSI_RE = /^\x1b(?:\[[0-9;?]*[A-Za-z]|_[^\x07\x1b]*(?:\x07|\x1b\\)|\][^\x07\x1b]*(?:\x07|\x1b\\))/;
@@ -47,7 +49,7 @@ const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 const fgRaw = ([r, g, b]: RGB) => `\x1b[38;2;${r};${g};${b}m`;
 const bgRaw = ([r, g, b]: RGB) => `\x1b[48;2;${r};${g};${b}m`;
 
-/** Recolor every "─" in a border line with one color, keeping other content (spinner, labels) intact. */
+/** Recolor every "─" in a border line with one color (drawn as RULE), keeping other content (spinner, labels) intact. */
 function colorBorder(line: string, color: RGB): string {
 	let out = "";
 	for (let i = 0; i < line.length; ) {
@@ -60,7 +62,7 @@ function colorBorder(line: string, color: RGB): string {
 			}
 		}
 		const ch = [...line.slice(i, i + 2)][0]!;
-		out += ch === "─" ? `${fgRaw(color)}─` : ch;
+		out += ch === "─" ? `${fgRaw(color)}${RULE}` : ch;
 		i += ch.length;
 	}
 	return out + RESET;
@@ -86,12 +88,15 @@ class OxoEditor extends CustomEditor {
 		}
 		if (bottom < 0) return super.render(width);
 
+		const rule = `${edge}${RULE.repeat(2)}`; // extends the rule across the arrow gutter
+		const arrow = `\x1b[1m${edge}${ARROW}${RESET} `;
+		let firstContent = true;
 		return lines.map((line, i) => {
-			if (i === 0) return `${edge}╭${colorBorder(line, color)}${edge}╮${RESET}`;
-			if (i === bottom) return `${edge}╰${colorBorder(line, color)}${edge}╯${RESET}`;
-			if (i > bottom) return ` ${line}`; // autocomplete list sits below the box
-			const pad = " ".repeat(Math.max(0, inner - visibleWidth(line)));
-			return `${edge}│${RESET}${line}${pad}${edge}│${RESET}`;
+			if (i === 0 || i === bottom) return `${rule}${colorBorder(line, color)}`;
+			if (i > bottom) return ` ${line}`; // autocomplete list sits below the rules
+			const gutter = firstContent ? arrow : "  ";
+			firstContent = false;
+			return `${gutter}${line}`;
 		});
 	}
 }
