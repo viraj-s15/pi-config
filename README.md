@@ -43,7 +43,7 @@ cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
 - `skills/`: all skills in the repo
 - `themes/`: `oxocarbon-grey` and `catppuccin`
 - `models.json`: 900K context for the OpenAI GPT-6 and GPT-5.6 models
-- `settings.json`: Anthropic Opus 4.8, auto-compaction off, `oxocarbon-grey` theme
+- `settings.json`: OpenAI GPT-6.1 Sol (900K) at high effort, auto-compaction off, `oxocarbon-grey` theme
 
 ## LaTeX images
 

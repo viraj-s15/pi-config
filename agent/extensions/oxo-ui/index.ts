@@ -190,7 +190,9 @@ export default function (pi: ExtensionAPI) {
 	let git: GitInfo | undefined;
 	let lastFailed = false;
 	let cacheRate: number | undefined; // last response: cacheRead / total prompt tokens
-	let tps = 0; // generation speed, tokens/sec: live while streaming, back to 0 when the agent is idle
+	let tps = 0; // generation speed, tokens/sec: live while streaming, held briefly after the run, then back to 0
+	let tpsReset: ReturnType<typeof setTimeout> | undefined;
+	const TPS_HOLD_MS = 10000; // how long the last speed stays visible once the agent goes idle
 	let genStart: number | undefined; // time of first streamed delta
 	let genChars = 0;
 	let lastLiveRender = 0;
@@ -315,11 +317,17 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("agent_start", (_e, _ctx) => {
 		running = true;
+		clearTimeout(tpsReset);
 		requestRender?.();
 	});
 	pi.on("agent_end", (_e, ctx) => {
 		running = false;
-		tps = 0;
+		// short answers finish in a couple of seconds, so keep the last speed readable before dropping to 0
+		clearTimeout(tpsReset);
+		tpsReset = setTimeout(() => {
+			tps = 0;
+			requestRender?.();
+		}, TPS_HOLD_MS);
 		refresh(ctx);
 	});
 	pi.on("message_start", (e, _ctx) => {
