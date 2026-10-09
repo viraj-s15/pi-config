@@ -1,0 +1,10 @@
+{
+  "name": "pi-latex-images",
+  "private": true,
+  "type": "module",
+  "description": "Render LaTeX math in pi as inline terminal images (Kitty graphics + unicode placeholders)",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "mathjax-full": "^3.2.2"
+  }
+}
