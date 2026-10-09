@@ -6,14 +6,14 @@ if (!query) {
   process.exit(1);
 }
 
-const SEARXNG_URL = 'http://localhost:8080/search';
+const SEARXNG_URL = new URL('/search', process.env.SEARXNG_URL || 'http://127.0.0.1:8888');
 const params = new URLSearchParams({
   q: query,
   format: 'json',
 });
 
 try {
-  const response = await fetch(`${SEARXNG_URL}?${params}`);
+  const response = await fetch(`${SEARXNG_URL}?${params}`, { signal: AbortSignal.timeout(15000) });
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);
   }
