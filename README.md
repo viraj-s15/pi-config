@@ -39,10 +39,11 @@ ln -sf $REPO/agent/models.json ~/.pi/agent/models.json
 cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
 - `themes/`: `oxocarbon-grey` and `catppuccin`
 - `models.json`: 900K context for the OpenAI GPT-6 and GPT-5.6 models
+- Subagents have no predefined roles. Each call defines its own prompt, tools and model. The default is `openai/gpt-6-luna` at high effort.
 - `settings.json`: OpenAI GPT-6.1 Sol (900K) at high effort, auto-compaction off, `oxocarbon-grey` theme
 
 ## LaTeX images
@@ -54,14 +55,14 @@ npm install --prefix ~/Documents/github/pi-config/agent/extensions/latex-images
 - Needs a terminal with Kitty graphics. Elsewhere it falls back to plain text math.
 - `/latex off` turns it off. `PI_LATEX_IMAGES=0` disables it at startup.
 
-## Anthropic login
+## Logins
 
 ```bash
 pi install npm:@gotgenes/pi-anthropic-auth@3.4.2
 pi
 ```
 
-Then run `/login anthropic` inside pi.
+Then run `/login` inside pi and pick OpenAI (the default model). Pick Anthropic too if you want Claude.
 
 ## Local web search (SearXNG)
 
@@ -127,6 +128,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 
 - `/reload`: reload extensions after editing them
 - `/oxo`: toggle the custom input box and footer
+- `/verbs on|off`: Claude Code style spinner with random verbs
+- `/bullets on|off`: one-line tool bullets instead of boxed blocks (`Ctrl+O` expands a row, `/reload` redraws old rows)
 - `/usage`: quota windows for each provider
 - `/todos`: list todos
 - `/todo-widget [expand|collapse|on|off]`: todo line above the input (`Ctrl+Shift+E` expands it)
