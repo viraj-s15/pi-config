@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), image-paste (attach pasted images), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -56,7 +56,27 @@ cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 
 The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `avg t/s`, context usage and the model.
 
-- `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, and ignores tool-call responses. It stays visible between turns. Changing sessions or `/reload` resets it, and nothing is saved.
+- `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, and ignores tool-call responses. It shows `–` until the first final answer of a session, and stays visible between turns. `/reload` keeps it (held in process memory). A new, resumed or forked session starts over, and nothing is written to disk. Turns that end in tool calls add no sample, so a long run of tool use leaves it unchanged.
+
+## Image paste
+
+Pi's `Ctrl+V` saves a clipboard image to a temp file and types its path into the editor. `image-paste` turns image paths in a message you send into real attachments, so the model receives the picture and not just a filename.
+
+- Copy a screenshot (`Cmd+Ctrl+Shift+4` copies to the clipboard), press `Ctrl+V`, type your question and press Enter. Dragging a file into the terminal or typing a path works too, including `~/` paths, quoted paths and paths with spaces.
+- The message shows `[image 1: name.png]` where the path was. Only files that exist and really are images (checked by their bytes, not the extension) are attached. Anything else stays as typed. At most 8 images per message, and nothing over 32 MB.
+- The original bytes are attached and Pi shrinks them to the active model's limits (the `images.autoResize` setting applies). Attachments are saved in the session and sent again with every later turn, so large screenshots add up.
+- It only acts on text you type. rpc and extension-sent messages are untouched. The temporary screenshot thumbnail on macOS disappears after a few seconds, so paste from the clipboard when you can.
+
+### Cmd+V in Ghostty
+
+A terminal cannot paste an image, so in Ghostty `Cmd+V` on an image-only clipboard sends nothing. These two lines make `Cmd+V` follow its normal paste with an empty bracketed paste (needs Ghostty 1.3 or newer, then `Cmd+Shift+,` to reload):
+
+```
+keybind = super+v=paste_from_clipboard
+keybind = chain=text:\x1b[200~\x1b[201~
+```
+
+`image-paste` reacts to that empty paste: if the clipboard holds only an image, it is saved and its path inserted, like `Ctrl+V`. If the clipboard has text, the normal paste already happened and the empty one is ignored. Claude Code treats the same signal the same way. Terminal apps that do not turn on bracketed paste may print `^[[200~^[[201~` after a paste, so remove the two lines if you see that. Without them, `Ctrl+V` still works.
 
 ## LaTeX images
 
@@ -159,7 +179,7 @@ The footer tests include a synthetic OpenAI Responses event sequence passed thro
 - `/verbs on|off`: Claude Code style spinner with random verbs
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block
 - `/bullets on|off`: one-line tool bullets instead of boxed blocks (`Ctrl+O` expands a row, `/reload` redraws old rows)
-- `/usage`: quota windows for each provider
+- `/usage`: quota windows for each provider, plus an API cost section: what the last 30 days of messages would have cost at API prices, summed across all saved sessions. It shows one stacked bar for each provider's share (OpenAI blue, Anthropic orange), a value multiple against your plan price (`PLANS` in `extensions/usage/index.ts`, currently $20 each), and a 30-day stacked column chart (rolling 24-hour buckets, oldest first). It is a rolling window, not tied to a billing cycle. Forked sessions are not double-counted. Subagent and `/btw` calls are not saved in sessions, so they are not included.
 - `/todos`: list todos
 - `/todo-widget [expand|collapse|on|off]`: todo line above the input (`Ctrl+Shift+E` expands it)
 - `/latex on|off`: LaTeX image rendering

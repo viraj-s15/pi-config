@@ -184,6 +184,11 @@ function shortPath(cwd: string): string {
 	return p || "/";
 }
 
+// /reload re-imports this file but keeps the process, so the running average is parked here
+// (memory only) to survive it. Any other session start (new, resume, fork, startup) clears it.
+const SHARED_TPS = Symbol.for("pi-config.oxo-ui.rolling-tps");
+const shared = globalThis as { [SHARED_TPS]?: number };
+
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let running = false;
@@ -279,7 +284,7 @@ export default function (pi: ExtensionAPI) {
 					if (statuses.length) optional.push(seg(P.panel, statuses.join(" "), P.text));
 					optional.push(seg(P.panel, `\uF1C0 ${cacheRate !== undefined ? `${Math.round(cacheRate * 100)}%` : "–"} cache`, P.text));
 					if (cost > 0) optional.push(seg(P.green, `$${cost.toFixed(3)}`));
-					optional.push(seg(P.cyan, `\uF0E7 ${averageTps === undefined ? "0" : averageTps.toFixed(averageTps < 10 ? 1 : 0)} avg t/s`));
+					optional.push(seg(P.cyan, `\uF0E7 ${averageTps === undefined ? "–" : averageTps.toFixed(averageTps < 10 ? 1 : 0)} avg t/s`));
 					const required: Seg[] = [];
 					if (usage?.percent != null) {
 						const pct = usage.percent;
@@ -313,9 +318,10 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setFooter(undefined);
 	};
 
-	pi.on("session_start", (_e, ctx) => {
+	pi.on("session_start", (e, ctx) => {
 		statsDirty = true;
-		averageTps = undefined;
+		averageTps = e.reason === "reload" ? shared[SHARED_TPS] : undefined;
+		shared[SHARED_TPS] = averageTps;
 		answerStart = undefined;
 		if (enabled) install(ctx);
 	});
@@ -354,6 +360,7 @@ export default function (pi: ExtensionAPI) {
 				const responseTps = answerTokens / elapsed;
 				if (Number.isFinite(responseTps)) {
 					averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
+					shared[SHARED_TPS] = averageTps;
 				}
 			}
 		}

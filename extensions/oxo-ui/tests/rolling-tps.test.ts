@@ -7,7 +7,10 @@ import type { AssistantMessage, AssistantMessageEvent, Model } from "@earendil-w
 
 const { processResponsesStream } = await import(piModuleUrl("@earendil-works/pi-ai/dist/api/openai-responses-shared.js"));
 
+const SHARED_TPS = Symbol.for("pi-config.oxo-ui.rolling-tps");
+
 function fixture(t: TestContext) {
+  delete (globalThis as any)[SHARED_TPS]; // reloads share state in memory; tests must not
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
   const handlers = new Map<string, any>();
   let footer: any;
@@ -40,9 +43,10 @@ function fixture(t: TestContext) {
       },
     },
   } as any;
-  const register = () => { oxoExtension(pi); handlers.get("session_start")({}, ctx); };
+  const register = (reason?: string) => { oxoExtension(pi); handlers.get("session_start")({ reason }, ctx); };
   register();
   const emit = (event: string, payload: any = {}) => handlers.get(event)?.(payload, ctx);
+  const shows = () => /([\d.]+|–) avg t\/s/.exec(text())?.[1];
   const text = () => footer.render(300).join("\n").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
   const rate = () => {
     const match = /([\d.]+) (?:avg )?t\/s/.exec(text());
@@ -61,7 +65,7 @@ function fixture(t: TestContext) {
     end(output, stopReason, "assistant", reasoning);
   };
   return {
-    emit, text, rate, delta, end, response, register, branch,
+    emit, text, shows, rate, delta, end, response, register, branch,
     branchScans: () => branchScans,
     navigate: (nextLeafId: string) => { leafId = nextLeafId; emit("session_tree"); },
     changeGitBranch: () => branchChanged?.(),
@@ -125,7 +129,7 @@ test("first response initializes TPS; later responses blend into the one previou
 
 test("footer identifies the metric as an average", t => {
   const f = fixture(t);
-  assert.match(f.text(), /0 avg t\/s/);
+  assert.match(f.text(), /– avg t\/s/);
 });
 
 test("streaming leaves the previous completed average unchanged", t => {
@@ -206,27 +210,59 @@ test("user messages cannot change TPS or reset an assistant's pending timing", t
   assert.equal(f.rate(), 60);
 });
 
-test("session start clears the average and any pending response timestamp", t => {
+test("a new session clears the average and any pending response timestamp", t => {
   const f = fixture(t);
   f.response(100);
   f.emit("message_start", { message: { role: "assistant" } });
   f.delta();
   t.mock.timers.tick(1000);
-  f.emit("session_start");
-  assert.equal(f.rate(), 0);
+  f.emit("session_start", { reason: "new" });
+  assert.equal(f.shows(), "–");
   f.end(20);
-  assert.equal(f.rate(), 0);
+  assert.equal(f.shows(), "–");
   f.response(40);
   assert.equal(f.rate(), 40);
 });
 
-test("reloading extension state begins a fresh in-memory average", t => {
+test("with no completed answer yet the footer shows a dash, not a zero", t => {
+  const f = fixture(t);
+  assert.equal(f.shows(), "–");
+});
+
+test("reloading keeps this session's average, so /reload does not blank the footer", t => {
   const f = fixture(t);
   f.response(100);
-  f.register();
-  assert.equal(f.rate(), 0);
+  f.response(60);
+  assert.equal(f.rate(), 80);
+  f.register("reload");
+  assert.equal(f.rate(), 80, "average survives the reload");
   f.response(20);
-  assert.equal(f.rate(), 20);
+  assert.equal(f.rate(), 50, "and keeps blending afterwards");
+});
+
+test("resuming, forking, a new session and a fresh start all begin without an average", t => {
+  const f = fixture(t);
+  for (const reason of ["resume", "fork", "new", "startup", undefined]) {
+    f.response(100);
+    assert.equal(f.rate(), 100);
+    f.register(reason);
+    assert.equal(f.shows(), "–", `reason ${reason}`);
+  }
+});
+
+test("a reload still resets an average that a session change already cleared", t => {
+  const f = fixture(t);
+  f.response(100);
+  f.emit("session_start", { reason: "new" });
+  f.register("reload");
+  assert.equal(f.shows(), "–");
+});
+
+test("the carried-over average is memory only", t => {
+  const f = fixture(t);
+  f.response(100);
+  assert.equal(typeof (globalThis as any)[SHARED_TPS], "number");
+  assert.doesNotThrow(() => f.register("reload"), "appendEntry/sendMessage would throw in this fixture");
 });
 
 test("hidden reasoning is subtracted before computing and blending answer TPS", t => {
@@ -316,7 +352,7 @@ test("sanitized OpenAI Responses protocol fixture normalizes reasoning, tool use
   f.emit("message_start", { message: { role: "assistant" } });
   for (const event of toolTurn.normalized) f.emit("message_update", { assistantMessageEvent: event });
   f.emit("message_end", { message: toolTurn.message });
-  assert.equal(f.rate(), 0, "tool-use turn does not initialize TPS");
+  assert.equal(f.shows(), "–", "tool-use turn does not initialize TPS");
 
   f.emit("message_start", { message: { role: "assistant" } });
   for (const event of finalAnswer.normalized) {
@@ -366,12 +402,12 @@ test("tool-call-only and reasoning-only bursts cannot initialize the average", t
   f.delta("toolcall_delta");
   t.mock.timers.tick(1000);
   f.end(500, "toolUse");
-  assert.equal(f.rate(), 0);
+  assert.equal(f.shows(), "–");
   f.emit("message_start", { message: { role: "assistant" } });
   f.delta("thinking_delta");
   t.mock.timers.tick(1000);
   f.end(500, "stop", "assistant", 500);
-  assert.equal(f.rate(), 0);
+  assert.equal(f.shows(), "–");
 });
 
 test("a tool call in finalized content excludes that message even with stop reason stop", t => {

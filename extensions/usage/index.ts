@@ -1,11 +1,13 @@
 /**
- * /usage: subscription quota for Anthropic (Claude), OpenAI Codex (ChatGPT) and Antigravity.
+ * /usage: subscription quota for Anthropic (Claude), OpenAI Codex (ChatGPT) and Antigravity, plus 30-day spend.
  *
  * Anthropic tokens are only read; Pi refreshes its own when you send a message.
  * The Codex login in ~/.codex/auth.json is refreshed here when it expires (see codex-auth.ts).
  *   Anthropic   GET api.anthropic.com/api/oauth/usage      token: pi auth.json, else ~/.claude/.credentials.json
  *   Codex       GET chatgpt.com/backend-api/wham/usage     token: ~/.codex/auth.json (Pi's own OpenAI token is not accepted)
  *   Antigravity `agy -p /usage --output-format json`        (answered locally by agy, no model turn)
+ *
+ * API cost   API-equivalent cost of the last 30 days, summed from saved sessions (see spend.ts)
  *
  * Keys in the overlay: r = refresh, esc / q / enter = close.
  */
@@ -17,6 +19,8 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { withCodexCredentials } from "./codex-auth.ts";
+import { columnChart, costRows, stackedBar } from "./cost-chart.ts";
+import { readSpend } from "./spend.ts";
 
 // ---------- palette (oxocarbon-grey) ----------
 type RGB = [number, number, number];
@@ -26,6 +30,7 @@ const C = {
 	teal: [0x08, 0xbd, 0xba] as RGB,
 	purple: [0xbe, 0x95, 0xff] as RGB,
 	rose: [0xff, 0x7e, 0xb6] as RGB,
+	orange: [0xff, 0x83, 0x2b] as RGB,
 	pink: [0xee, 0x53, 0x96] as RGB,
 	green: [0x42, 0xbe, 0x65] as RGB,
 	text: [0xdd, 0xe1, 0xe6] as RGB,
@@ -44,11 +49,27 @@ interface Win {
 	resetsAt?: number; // epoch ms
 	note?: string;
 }
+interface CostProvider {
+	name: string;
+	color: RGB;
+	total: number;
+	share: number; // percent of the total, 0..100
+	daily: number[];
+	plan?: number;
+	multiple?: number;
+	models: { model: string; total: number }[];
+}
+interface CostView {
+	total: number;
+	plansTotal: number;
+	providers: CostProvider[];
+}
 interface Section {
 	name: string;
 	plan?: string;
 	wins: Win[];
 	extra: string[]; // free-form lines
+	cost?: CostView; // drawn as bars by the renderer
 	error?: string;
 	loading: boolean;
 }
@@ -246,6 +267,39 @@ async function fetchAntigravity(): Promise<Partial<Section>> {
 	}
 }
 
+// ---------- spend ----------
+const PROVIDER_NAMES: { [id: string]: string } = { openai: "OpenAI", anthropic: "Anthropic", google: "Google" };
+const providerName = (id: string) => PROVIDER_NAMES[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+const money = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// Monthly plan prices in USD. Value multiple = last 30 days at API prices / plan price. Edit to match what you pay.
+const PLANS: { [provider: string]: number } = { openai: 20, anthropic: 20 };
+// Blue and orange stay distinguishable for most colour-vision types; other providers cycle through the rest.
+const COST_COLORS: { [provider: string]: RGB } = { openai: C.sky, anthropic: C.orange };
+const FALLBACK_COLORS: RGB[] = [C.purple, C.teal, C.rose, C.blue];
+
+async function fetchSpend(): Promise<Partial<Section>> {
+	const spend = await readSpend({ dir: join(PI_DIR, "sessions") });
+	const window = `last ${spend.days} days`;
+	if (!spend.messages) return { plan: window, extra: ["no spend recorded in saved sessions yet"] };
+	let fallback = 0;
+	const providers: CostProvider[] = costRows(spend.byProvider, PLANS).map((row) => {
+		const data = spend.byProvider.find((p) => p.provider === row.provider);
+		return {
+			name: providerName(row.provider),
+			color: COST_COLORS[row.provider] ?? FALLBACK_COLORS[fallback++ % FALLBACK_COLORS.length]!,
+			total: row.total,
+			share: spend.total > 0 ? (row.total / spend.total) * 100 : 0,
+			daily: data?.daily ?? new Array<number>(spend.days).fill(0),
+			plan: row.plan,
+			multiple: row.multiple,
+			models: data?.models ?? [],
+		};
+	});
+	const plansTotal = providers.reduce((a, p) => a + (p.plan ?? 0), 0);
+	return { plan: window, cost: { total: spend.total, plansTotal, providers } };
+}
+
 // ---------- rendering ----------
 function fmtReset(at?: number): string {
 	if (!at) return "";
@@ -261,9 +315,9 @@ function fmtReset(at?: number): string {
 
 const usageColor = (p: number): RGB => (p >= 85 ? C.pink : p >= 60 ? C.purple : C.teal);
 
-function bar(pct: number, width: number): string {
+function bar(pct: number, width: number, color: RGB = usageColor(pct)): string {
 	const filled = Math.round((clampPct(pct) / 100) * width);
-	return fg(usageColor(pct), "█".repeat(filled)) + fg(C.track, "█".repeat(width - filled));
+	return fg(color, "█".repeat(filled)) + fg(C.track, "█".repeat(width - filled));
 }
 
 class UsageView {
@@ -283,6 +337,48 @@ class UsageView {
 
 	invalidate(): void {}
 
+	private renderCost(cost: CostView, barW: number, inner: number, push: (line: string) => void): void {
+		const swatch = (p: CostProvider) => fg(p.color, "■");
+		const multiple = (m: number) => fg(m >= 1 ? C.green : C.rose, bold(`${m.toFixed(1)}×`));
+		const noZeros = (n: number) => money(n).replace(".00", "");
+
+		const overall = cost.plansTotal > 0 ? Math.round((cost.total / cost.plansTotal) * 10) / 10 : undefined;
+		const headline =
+			`    ${fg(C.text, bold(money(cost.total)))}  ${fg(C.muted, "at API prices")}` +
+			(overall === undefined ? "" : `  ${fg(C.subtle, "·")}  ${multiple(overall)} ${fg(C.muted, `your ${noZeros(cost.plansTotal)} of plans`)}`);
+
+		const nameW = Math.max(...cost.providers.map((p) => p.name.length));
+		const legend: string[] = [];
+		for (const p of cost.providers) {
+			const plan = p.plan ? `  ${multiple(p.multiple ?? 0)} ${fg(C.muted, `of ${noZeros(p.plan)} plan`)}` : "";
+			legend.push(`    ${swatch(p)} ${fg(C.text, p.name.padEnd(nameW))}  ${fg(p.color, money(p.total).padStart(9))}  ${fg(C.subtle, `${Math.round(p.share)}%`.padStart(4))}${plan}`);
+			if (p.models.length > 1) {
+				legend.push(`      ${fg(C.subtle, p.models.slice(0, 3).map((m) => `${m.model} ${money(m.total)}`).join("  ·  "))}`);
+			}
+		}
+
+		// The bar spans the text above and below it: at least as wide as the quota bars, at most the modal.
+		const textW = Math.max(...[headline, ...legend].map((l) => visibleWidth(l))) - 4;
+		const avail = Math.max(barW, Math.min(textW, inner - 8));
+
+		push(headline);
+		push("");
+		push(`    ${stackedBar(cost.providers.map((p) => ({ value: p.total, color: p.color })), avail, C.track)}`);
+		for (const l of legend) push(l);
+		push("");
+
+		const days = cost.providers[0]!.daily.length;
+		const chart = columnChart(
+			cost.providers.map((p) => ({ color: p.color, daily: p.daily })),
+			{ height: 4, colWidth: avail >= days * 2 ? 2 : 1, width: avail, track: C.track },
+		);
+		chart.rows.forEach((line, i) => push(`    ${line}${i === 0 ? `  ${fg(C.subtle, `peak ${money(chart.peak)}/day`)}` : ""}`));
+		const span = visibleWidth(chart.rows[0] ?? "");
+		const left = `${chart.shown}d ago`;
+		push(`    ${fg(C.subtle, left + " ".repeat(Math.max(1, span - left.length - 3)) + "now")}`);
+		push(`    ${fg(C.subtle, "Excludes subagent and /btw calls.")}`);
+	}
+
 	render(width: number): string[] {
 		const inner = Math.max(10, width - 2);
 		const edge = (s: string) => fg(C.rose, s);
@@ -298,7 +394,7 @@ class UsageView {
 			16,
 			Math.max(4, ...this.sections.flatMap((s) => s.wins.map((w) => w.label.length))),
 		);
-		const barW = Math.max(8, Math.min(24, inner - labelW - 48));
+		const barW = Math.max(8, Math.min(30, inner - labelW - 48));
 
 		for (const s of this.sections) {
 			const plan = s.plan ? fg(C.muted, `  ·  ${s.plan}`) : "";
@@ -314,6 +410,7 @@ class UsageView {
 					);
 				}
 				for (const e of s.extra) lines.push(row(`    ${fg(C.muted, e)}`));
+				if (s.cost) this.renderCost(s.cost, barW, inner, (l) => lines.push(row(l)));
 			}
 			lines.push(row(""));
 		}
@@ -327,7 +424,7 @@ class UsageView {
 // ---------- command ----------
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("usage", {
-		description: "Show Anthropic, Codex and Antigravity subscription usage",
+		description: "Show Anthropic, Codex and Antigravity subscription usage and 30-day spend",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
 
@@ -335,6 +432,7 @@ export default function (pi: ExtensionAPI) {
 				{ name: "Anthropic", fetch: fetchAnthropic },
 				{ name: "Codex", fetch: fetchCodex },
 				{ name: "Antigravity", fetch: fetchAntigravity },
+				{ name: "API cost", fetch: fetchSpend },
 			];
 			const sections: Section[] = providers.map((p) => ({ name: p.name, wins: [], extra: [], loading: true }));
 			let generation = 0;
@@ -366,7 +464,7 @@ export default function (pi: ExtensionAPI) {
 					load();
 					return view;
 				},
-				{ overlay: true, overlayOptions: { width: 78, minWidth: 50, maxHeight: "90%", anchor: "center" } },
+				{ overlay: true, overlayOptions: { width: 96, minWidth: 50, maxHeight: "90%", anchor: "center" } },
 			);
 		},
 	});

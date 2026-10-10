@@ -4,7 +4,8 @@ import { createTestLoader } from "./pi-runtime.mjs";
 const suites = {
   btw: "../extensions/btw/tests/btw.test.ts",
   "oxo-ui": "../extensions/oxo-ui/tests/rolling-tps.test.ts",
-  usage: "../extensions/usage/tests/codex-auth.test.ts",
+  "image-paste": ["../extensions/image-paste/tests/attach.test.ts", "../extensions/image-paste/tests/clipboard.test.ts"],
+  usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };
 const requested = process.argv.slice(2);
 const selected = requested.length ? requested : Object.keys(suites);
@@ -14,5 +15,5 @@ if (selected.some(name => !Object.hasOwn(suites, name))) {
 }
 const loader = await createTestLoader();
 for (const name of new Set(selected)) {
-  await loader.import(fileURLToPath(new URL(suites[name], import.meta.url)));
+  for (const file of [suites[name]].flat()) await loader.import(fileURLToPath(new URL(file, import.meta.url)));
 }
