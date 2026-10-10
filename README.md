@@ -128,6 +128,20 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 - `/usage` also reads Codex quota from `~/.codex/auth.json` (Codex CLI login) and Antigravity quota from the `agy` CLI.
 - Todo files are written to `.pi/todos/` in each project.
 
+## Tests
+
+From the repository root:
+
+```sh
+node tests/run.mjs         # all tests
+node tests/run.mjs btw     # side-question tests only
+node tests/run.mjs oxo-ui  # footer tests only
+```
+
+Tests use Node's test runner and the packages from Pi's managed installation; no additional install is needed. Set `PI_MANAGED_INSTALL_ROOT` if Pi is installed somewhere other than `~/.pi/agent/install`.
+
+The footer tests include a synthetic OpenAI Responses event sequence passed through Pi's actual adapter. This checks normalization and token accounting without a paid request; it is not a live-provider speed benchmark.
+
 ## Commands
 
 - `/reload`: reload extensions after editing them

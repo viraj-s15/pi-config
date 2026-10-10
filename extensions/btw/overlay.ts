@@ -8,6 +8,7 @@ export class BtwOverlay implements Component {
   private readonly scroll = new ScrollView(this.markdown, { scrollbar: "hidden", overscroll: "contain" });
   private selected: number | undefined;
   private notice = "";
+  private renderedText: string | undefined;
   private disposed = false;
 
   constructor(
@@ -80,7 +81,10 @@ export class BtwOverlay implements Component {
     let text = exchange?.answer || "Waiting for the model…";
     if (exchange?.error) text += `\n\nError: ${exchange.error}`;
     if (exchange?.status === "cancelled") text += "\n\n[Side question cancelled.]";
-    this.markdown.setText(text);
+    if (text !== this.renderedText) {
+      this.renderedText = text;
+      this.markdown.setText(text);
+    }
 
     // Very small terminals still get a readable, width-safe view without chrome.
     if (width < 5 || maxHeight < 8) {

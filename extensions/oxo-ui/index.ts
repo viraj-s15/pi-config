@@ -140,10 +140,10 @@ function gitInfo(cwd: string): Promise<GitInfo | undefined> {
 }
 
 // ---------- powerline segments ----------
-const CAP_L = "\uE0B6"; //
-const CAP_R = "\uE0B4"; //
-const SEP_L = "\uE0B0"; //
-const SEP_R = "\uE0B2"; //
+const CAP_L = "\uE0B6";
+const CAP_R = "\uE0B4";
+const SEP_L = "\uE0B0";
+const SEP_R = "\uE0B2";
 const INK = P.ink;
 
 interface Seg {
@@ -195,8 +195,14 @@ export default function (pi: ExtensionAPI) {
 	let cost = 0;
 	let requestRender: (() => void) | undefined;
 	let refreshing = false;
+	let statsDirty = true;
+	let statsLeafId: string | null | undefined;
 
 	const refreshStats = (ctx: ExtensionContext) => {
+		const leafId = ctx.sessionManager.getLeafId();
+		if (!statsDirty && leafId === statsLeafId) return;
+		statsLeafId = leafId;
+		statsDirty = false;
 		cost = 0;
 		lastFailed = false;
 		cacheRate = undefined;
@@ -283,7 +289,7 @@ export default function (pi: ExtensionAPI) {
 					required.push(seg(P.sky, model));
 
 					const leftStr = renderLeft(left);
-					let right = renderRight([...optional, ...required]);
+					let right = "";
 					for (let drop = 0; drop <= optional.length; drop++) {
 						right = renderRight([...optional.slice(drop), ...required]);
 						if (width - visibleWidth(leftStr) - visibleWidth(right) >= 3) break;
@@ -308,6 +314,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_e, ctx) => {
+		statsDirty = true;
 		averageTps = undefined;
 		answerStart = undefined;
 		if (enabled) install(ctx);
@@ -331,6 +338,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
+		statsDirty = true;
 		const m = e.message as AssistantMessage;
 		const finalAnswer = (m.stopReason === "stop" || m.stopReason === "length") &&
 			!m.content.some(block => block.type === "toolCall");
@@ -353,6 +361,7 @@ export default function (pi: ExtensionAPI) {
 		cacheRate = cacheRateOf(m);
 		requestRender?.();
 	});
+	pi.on("session_tree", (_e, ctx) => refreshStats(ctx));
 	pi.on("turn_end", (_e, ctx) => refreshStats(ctx));
 	pi.on("tool_execution_end", (_e, ctx) => void refreshGit(ctx));
 	pi.on("model_select", (_e, _ctx) => requestRender?.());

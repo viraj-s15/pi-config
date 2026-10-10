@@ -36,7 +36,7 @@ This repository's `extensions/` is already linked to `~/.pi/agent/extensions/`. 
 From the repository root:
 
 ```sh
-node extensions/btw/tests/run.mjs
+node tests/run.mjs btw
 ```
 
-The tests use Node's test runner, the installed Pi packages and its `jiti` TypeScript loader. No extra dependencies are needed. The test runner supports Pi's managed installation layout and the `PI_MANAGED_INSTALL_ROOT` override. Automated tests do not make paid provider requests.
+Run `node tests/run.mjs` for all suites. See the [repository testing instructions](../../README.md#tests) for runtime requirements. Automated tests do not make paid provider requests.

@@ -93,6 +93,56 @@ test("compaction and context edits follow the actual Pi session projection", () 
   assert.doesNotMatch(text, /old huge conversation|original/);
 });
 
+test("context projects relevant message data without cloning discarded details", () => {
+  const image = { type: "image", data: "source-image", mimeType: "image/png" };
+  const source = [
+    user("question"),
+    assistant("answer", { content: [{ type: "text", text: "answer" }, { type: "thinking", thinking: "private" }] }),
+  ] as any[];
+  source[0].content = [{ type: "text", text: "question" }, image];
+  Object.defineProperty(source[0], "unused", { enumerable: true, get() { throw new Error("discarded field was cloned"); } });
+  const result = toolResult("call");
+  Object.defineProperty(result, "details", { enumerable: true, get() { throw new Error("tool details were cloned"); } });
+  source.push(assistant("call", { content: [toolCall("call"), { ...toolCall("unused"), arguments: { huge: "unused-argument" } }] }), result);
+  const context = buildBtwContext(source, "Pi", [], "ask");
+  const copiedBlocks = (context.messages[0] as any).content;
+  assert.notEqual(copiedBlocks[1], image);
+  assert.equal(copiedBlocks[1].data, image.data);
+  assert.notEqual(copiedBlocks[0], source[0].content[0]);
+  copiedBlocks[1].data = "provider mutation";
+  assert.equal(image.data, "source-image");
+  image.mimeType = "source mutation";
+  assert.equal(copiedBlocks[1].mimeType, "image/png");
+  assert.match(JSON.stringify(context), /private/);
+  assert.doesNotMatch(JSON.stringify(context), /huge|unused-argument/);
+});
+
+test("snapshot keeps shell output and custom messages while respecting excluded shell commands", () => {
+  const context = buildBtwContext([
+    { role: "bashExecution", command: "pwd", output: "/workspace", exitCode: 0, cancelled: false, truncated: false, timestamp: 1 },
+    { role: "bashExecution", command: "secret", output: "not-for-context", excludeFromContext: true, exitCode: 0, cancelled: false, truncated: false, timestamp: 2 },
+    { role: "custom", customType: "note", display: true, content: [{ type: "text", text: "custom note" }], timestamp: 3 },
+  ], "Pi", [], "where?");
+  assert.match(JSON.stringify(context), /workspace/);
+  assert.match(JSON.stringify(context), /custom note/);
+  assert.doesNotMatch(JSON.stringify(context), /not-for-context/);
+});
+
+test("snapshot isolates assistant usage and signatures in both directions", () => {
+  const source = assistant("answer", { usage: structuredClone(usage), providerThinkingLevel: "high", thinkingLevel: "high", content: [
+    { type: "text", text: "answer", textSignature: "signature" },
+    { type: "thinking", thinking: "reason", thinkingSignature: "thinking-signature" },
+  ] });
+  const context = buildBtwContext([source], "Pi", [], "ask");
+  const copied = context.messages.find(m => m.role === "assistant")!;
+  assert.equal(copied.providerThinkingLevel, "high", "Anthropic replays per-message effort levels");
+  assert.equal(copied.thinkingLevel, "high");
+  copied.usage.cost.total = 42;
+  assert.equal(source.usage.cost.total, 0);
+  source.content[0].textSignature = "mutated";
+  assert.equal(copied.content[0].type === "text" && copied.content[0].textSignature, "signature");
+});
+
 test("follow-up side exchanges are replayed separately from main history", () => {
   const main = [user("main")];
   const context = buildBtwContext(main, "Pi", [{ question: "side one", answer: "answer one", status: "done" }], "follow-up");
@@ -111,6 +161,49 @@ test("thread streams a response, retaining only successful exchanges", async () 
   assert.equal(thread.current?.status, "done");
   assert.deepEqual(thread.exchanges.map(e => e.answer), ["8080"]);
   assert.equal(thread.busy, false);
+});
+
+test("a burst of 1000 deltas requests one redraw per interval and flushes on completion", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const thread = new BtwThread();
+  const updates: string[] = [];
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const registry = { streamSimple: () => Object.assign((async function* () {
+    for (let i = 0; i < 1000; i++) yield { type: "text_delta", delta: "a", partial: assistant() };
+    await wait;
+    yield { type: "text_delta", delta: "b", partial: assistant() };
+    yield { type: "done", message: assistant("a".repeat(1000) + "b") };
+  })(), { result: async () => assistant("a".repeat(1000) + "b") }) } as any;
+  const pending = thread.ask(request(thread, "burst", registry), () => updates.push(thread.current?.answer || ""));
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(49);
+  assert.deepEqual(updates, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(updates, ["a".repeat(1000)]);
+  release(); await pending;
+  assert.deepEqual(updates, ["a".repeat(1000), "a".repeat(1000) + "b"]);
+  t.mock.timers.tick(1000);
+  assert.equal(updates.length, 2, "completion clears the trailing timer");
+});
+
+test("cancelling a stream prevents queued and late redraws", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const thread = new BtwThread();
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const registry = { streamSimple: () => Object.assign((async function* () {
+    yield { type: "text_delta", delta: "partial", partial: assistant("partial") };
+    await wait;
+  })(), { result: async () => assistant("late") }) } as any;
+  let updates = 0;
+  const pending = thread.ask(request(thread, "cancel", registry), () => { updates++; });
+  await new Promise(resolve => setImmediate(resolve));
+  thread.cancel();
+  t.mock.timers.tick(1000);
+  release(); await pending;
+  assert.equal(updates, 0);
+  assert.equal(thread.current?.status, "cancelled");
 });
 
 test("thread holds at most 20 successful exchanges", async () => {
@@ -199,6 +292,20 @@ function overlayFixture(thread = new BtwThread(), rows = 24) {
   const overlay = new BtwOverlay(thread, tui, plainTheme, () => { dismissed++; }, async text => { copied.push(text); });
   return { overlay, thread, tui, copied, dismissed: () => dismissed, renders: () => renders };
 }
+
+test("overlay does not reset Markdown when rendered content is unchanged", () => {
+  const fixture = overlayFixture();
+  fixture.thread.exchanges.push({ question: "question", answer: "# stable", status: "done" });
+  const markdown = (fixture.overlay as any).markdown;
+  let setTextCalls = 0;
+  const setText = markdown.setText.bind(markdown);
+  markdown.setText = (text: string) => { setTextCalls++; setText(text); };
+  fixture.overlay.render(80);
+  const cachedLines = (markdown as any).cachedLines;
+  fixture.overlay.render(80);
+  assert.equal(setTextCalls, 1);
+  assert.equal((markdown as any).cachedLines, cachedLines);
+});
 
 test("overlay renders Markdown within narrow widths and short terminals", () => {
   const fixture = overlayFixture();

@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { tmpdir } from "node:os";
+import { piModuleUrl } from "../../../tests/pi-runtime.mjs";
 import oxoExtension from "../index.ts";
+import type { AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
+
+const { processResponsesStream } = await import(piModuleUrl("@earendil-works/pi-ai/dist/api/openai-responses-shared.js"));
 
 function fixture(t: TestContext) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
   const handlers = new Map<string, any>();
   let footer: any;
+  let branchChanged: (() => void) | undefined;
+  let branchScans = 0;
+  let leafId: string | null = "leaf-1";
   const branch: any[] = [];
   const pi = {
     on: (event: string, handler: any) => { handlers.set(event, handler); return () => {}; },
@@ -18,13 +25,17 @@ function fixture(t: TestContext) {
   const ctx = {
     hasUI: true, cwd: tmpdir(), model: { id: "test" },
     getContextUsage: () => undefined,
-    sessionManager: { getBranch: () => branch },
+    sessionManager: {
+      getBranch: () => { branchScans++; return branch; },
+      getLeafId: () => leafId,
+    },
     ui: {
       setEditorComponent: () => {},
       setFooter: (factory: any) => {
         footer?.dispose();
         footer = factory?.({ requestRender: () => {} }, {}, {
-          onBranchChange: () => () => {}, getGitBranch: () => undefined, getExtensionStatuses: () => new Map(),
+          onBranchChange: (callback: () => void) => { branchChanged = callback; return () => {}; },
+          getGitBranch: () => undefined, getExtensionStatuses: () => new Map(),
         });
       },
     },
@@ -49,8 +60,57 @@ function fixture(t: TestContext) {
     t.mock.timers.tick(milliseconds);
     end(output, stopReason, "assistant", reasoning);
   };
-  return { emit, text, rate, delta, end, response, register, branch };
+  return {
+    emit, text, rate, delta, end, response, register, branch,
+    branchScans: () => branchScans,
+    navigate: (nextLeafId: string) => { leafId = nextLeafId; emit("session_tree"); },
+    changeGitBranch: () => branchChanged?.(),
+  };
 }
+
+test("turn_end and agent_end share one branch stats scan", t => {
+  const f = fixture(t);
+  assert.equal(f.branchScans(), 1, "session installation initializes branch stats");
+  f.emit("turn_end");
+  f.emit("agent_end");
+  assert.equal(f.branchScans(), 1, "the same branch leaf should not be scanned twice");
+});
+
+test("session navigation refreshes branch stats when the leaf changes", t => {
+  const f = fixture(t);
+  f.branch.push({ type: "message", message: {
+    role: "assistant", stopReason: "error", content: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.125 } },
+  }});
+  f.navigate("leaf-2");
+  assert.equal(f.branchScans(), 2);
+  assert.match(f.text(), /\$0\.125/);
+  assert.match(f.text(), /✘/);
+  f.emit("turn_end");
+  f.emit("agent_end");
+  assert.equal(f.branchScans(), 2);
+});
+
+test("git-branch notifications do not invalidate unchanged conversation stats", t => {
+  const f = fixture(t);
+  f.changeGitBranch();
+  assert.equal(f.branchScans(), 1);
+});
+
+test("a completed answer refreshes stats once, without another scan at agent_end", t => {
+  const f = fixture(t);
+  f.response(40);
+  f.branch.push({ type: "message", message: {
+    role: "assistant", stopReason: "stop", content: [],
+    usage: { input: 10, output: 40, cacheRead: 90, cacheWrite: 0, cost: { total: 0.25 } },
+  }});
+  f.emit("turn_end");
+  assert.equal(f.branchScans(), 2);
+  assert.match(f.text(), /90%.*cache/);
+  assert.match(f.text(), /\$0\.250/);
+  f.emit("agent_end");
+  assert.equal(f.branchScans(), 2);
+});
 
 test("first response initializes TPS; later responses blend into the one previous number", t => {
   const f = fixture(t);
@@ -179,10 +239,92 @@ test("hidden reasoning is subtracted before computing and blending answer TPS", 
   assert.equal(f.rate(), 30);
 });
 
-test("the observed 392-output/217-reasoning reply is sampled as 175 answer tokens", t => {
+type ResponsesFixtureEvent =
+  | { type: "response.output_item.added"; output_index: number; item:
+      | { id: string; type: "function_call"; status: string; call_id: string; name: string; arguments: string }
+      | { id: string; type: "reasoning"; summary: unknown[]; content: unknown[] }
+      | { id: string; type: "message"; status: string; role: "assistant"; content: unknown[]; phase: "final_answer" } }
+  | { type: "response.output_item.done"; output_index: number; item:
+      | { id: string; type: "function_call"; status: string; call_id: string; name: string; arguments: string }
+      | { id: string; type: "reasoning"; summary: { type: "summary_text"; text: string }[]; content: unknown[] }
+      | { id: string; type: "message"; status: string; role: "assistant"; phase: "final_answer";
+          content: { type: "output_text"; text: string; annotations: unknown[] }[] } }
+  | { type: "response.reasoning_summary_text.delta"; output_index: number; delta: string }
+  | { type: "response.output_text.delta"; output_index: number; content_index: number; delta: string }
+  | { type: "response.completed"; response: { id: string; object: "response"; status: "completed"; output: unknown[];
+      usage: { input_tokens: number; output_tokens: number; total_tokens: number;
+        input_tokens_details?: { cached_tokens: number }; output_tokens_details?: { reasoning_tokens: number } } } };
+
+test("sanitized OpenAI Responses protocol fixture normalizes reasoning, tool use, text, and usage", async t => {
   const f = fixture(t);
-  f.response(392, 5000, "stop", 217);
-  assert.equal(f.rate(), 35);
+  const model = {
+    api: "openai-responses", provider: "openai", id: "fixture-model",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  } as Model<"openai-responses">;
+  const baseMessage = (): AssistantMessage => ({
+    role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "pending", timestamp: 0,
+  });
+  const normalize = async (events: ResponsesFixtureEvent[]) => {
+    const message = baseMessage();
+    const normalized: AssistantMessageEvent[] = [];
+    await processResponsesStream(
+      (async function* () { yield* events; })(),
+      message, { push: (event: AssistantMessageEvent) => normalized.push(event) }, model,
+    );
+    return { message, normalized };
+  };
+
+  // Sanitized synthetic protocol fixture, shaped for Pi 1.1.0's installed Responses adapter;
+  // it is not a captured live provider trace. The supplied 392/217 usage values are recorded
+  // from an actual session summary; the surrounding event sequence is constructed for this test.
+  const toolTurn = await normalize([
+    { type: "response.output_item.added", output_index: 0,
+      item: { id: "fc_fixture", type: "function_call", status: "in_progress", call_id: "call_fixture", name: "read", arguments: "{}" } },
+    { type: "response.output_item.done", output_index: 0,
+      item: { id: "fc_fixture", type: "function_call", status: "completed", call_id: "call_fixture", name: "read", arguments: "{}" } },
+    { type: "response.completed", response: { id: "resp_tool", object: "response", status: "completed",
+      output: [], usage: { input_tokens: 10, output_tokens: 8, total_tokens: 18 } } },
+  ]);
+  assert.equal(toolTurn.message.stopReason, "toolUse");
+  assert.ok(toolTurn.message.content.some(block => block.type === "toolCall"));
+
+  const finalAnswer = await normalize([
+    { type: "response.output_item.added", output_index: 0,
+      item: { id: "rs_fixture", type: "reasoning", summary: [], content: [] } },
+    { type: "response.reasoning_summary_text.delta", output_index: 0, delta: "Planning before answer." },
+    { type: "response.output_item.done", output_index: 0,
+      item: { id: "rs_fixture", type: "reasoning", summary: [{ type: "summary_text", text: "Planning before answer." }], content: [] } },
+    { type: "response.output_item.added", output_index: 1,
+      item: { id: "msg_fixture", type: "message", status: "in_progress", role: "assistant", content: [], phase: "final_answer" } },
+    { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "A sanitized answer " },
+    { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "streamed in pieces." },
+    { type: "response.output_item.done", output_index: 1,
+      item: { id: "msg_fixture", type: "message", status: "completed", role: "assistant", phase: "final_answer",
+        content: [{ type: "output_text", text: "A sanitized answer streamed in pieces.", annotations: [] }] } },
+    { type: "response.completed", response: { id: "resp_final", object: "response", status: "completed",
+      output: [], usage: { input_tokens: 30, output_tokens: 392, total_tokens: 422,
+        input_tokens_details: { cached_tokens: 5 }, output_tokens_details: { reasoning_tokens: 217 } } } },
+  ]);
+  assert.equal(finalAnswer.message.usage.output, 392);
+  assert.equal(finalAnswer.message.usage.reasoning, 217);
+  assert.ok(finalAnswer.normalized.some(event => event.type === "thinking_delta"));
+  assert.equal(finalAnswer.normalized.filter(event => event.type === "text_delta").length, 2);
+
+  f.emit("message_start", { message: { role: "assistant" } });
+  for (const event of toolTurn.normalized) f.emit("message_update", { assistantMessageEvent: event });
+  f.emit("message_end", { message: toolTurn.message });
+  assert.equal(f.rate(), 0, "tool-use turn does not initialize TPS");
+
+  f.emit("message_start", { message: { role: "assistant" } });
+  for (const event of finalAnswer.normalized) {
+    f.emit("message_update", { assistantMessageEvent: event });
+    if (event.type === "text_delta") t.mock.timers.tick(2500);
+  }
+  f.emit("message_end", { message: finalAnswer.message });
+  assert.equal(f.rate(), 35, "175 answer tokens over five seconds; reasoning is excluded");
 });
 
 test("reasoning and tool-argument deltas cannot start the answer-text clock", t => {

@@ -21,11 +21,14 @@ export class BtwThread {
   exchanges: BtwExchange[] = [];
   current: BtwExchange | undefined;
   private controller: AbortController | undefined;
+  private updateTimer: ReturnType<typeof setTimeout> | undefined;
 
   get busy(): boolean { return this.controller !== undefined; }
 
   cancel(): void {
     this.controller?.abort();
+    if (this.updateTimer !== undefined) clearTimeout(this.updateTimer);
+    this.updateTimer = undefined;
     if (this.current?.status === "streaming") this.current.status = "cancelled";
   }
 
@@ -45,6 +48,11 @@ export class BtwThread {
     const exchange: BtwExchange = { question: request.question, answer: "", status: "streaming" };
     this.current = exchange;
     const active = () => this.controller === controller && !controller.signal.aborted;
+    const flushUpdate = () => {
+      if (this.updateTimer !== undefined) clearTimeout(this.updateTimer);
+      this.updateTimer = undefined;
+      if (active()) onUpdate();
+    };
     try {
       const stream = request.registry.streamSimple(request.model, request.context, {
         signal: controller.signal,
@@ -54,7 +62,12 @@ export class BtwThread {
         if (!active()) break;
         if (event.type === "text_delta") {
           exchange.answer += event.delta;
-          onUpdate();
+          if (this.updateTimer === undefined) {
+            this.updateTimer = setTimeout(() => {
+              this.updateTimer = undefined;
+              if (active()) onUpdate();
+            }, 50);
+          }
         }
       }
       if (!active()) return;
@@ -84,8 +97,8 @@ export class BtwThread {
       }
     } finally {
       if (this.controller === controller) {
+        flushUpdate();
         this.controller = undefined;
-        onUpdate();
       }
     }
   }
