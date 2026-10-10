@@ -44,11 +44,19 @@ cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 
 - `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
+- `prompts/`: prompt templates (empty for now)
+- `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
+- `tests/`: the shared test runner (see [Tests](#tests))
 - `themes/`: `oxocarbon-grey` and `catppuccin`
 - `models.json`: 900K context for the OpenAI GPT-6 and GPT-5.6 models
 - Subagents have no predefined roles. Each call defines its own prompt, tools and model. The default is `openai/gpt-6-luna` at high effort.
 - `settings.json`: OpenAI GPT-6.1 Sol (900K) at high effort, auto-compaction off, `oxocarbon-grey` theme
-- Footer `avg t/s`: an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, excluding tool-call responses. It stays visible between turns; changing sessions or `/reload` resets it. Nothing is saved.
+
+## Footer
+
+The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `avg t/s`, context usage and the model.
+
+- `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, and ignores tool-call responses. It stays visible between turns. Changing sessions or `/reload` resets it, and nothing is saved.
 
 ## LaTeX images
 
