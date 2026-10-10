@@ -45,7 +45,7 @@
 
     "selectedBg": "bgSelection",
     "userMessageBg": "bgFloat",
-    "userMessageText": "",
+    "userMessageText": "#f2f4f8",
     "customMessageBg": "bgFloat",
     "customMessageText": "",
     "customMessageLabel": "purple",
