@@ -39,7 +39,7 @@ ln -sf $REPO/agent/models.json ~/.pi/agent/models.json
 cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
 - `themes/`: `oxocarbon-grey` and `catppuccin`
 - `models.json`: 900K context for the OpenAI GPT-6 and GPT-5.6 models
@@ -127,6 +127,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 ## Commands
 
 - `/reload`: reload extensions after editing them
+- `/btw <question>`: answer a side question with the current model and chat context, without adding it to chat history (no tools; works while the agent is busy). Bare `/btw` reopens the last answer. [Controls and details](agent/extensions/btw/README.md).
 - `/oxo`: toggle the custom input box and footer
 - `/verbs on|off`: Claude Code style spinner with random verbs
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block
