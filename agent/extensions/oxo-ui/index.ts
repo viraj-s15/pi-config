@@ -191,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 	let lastFailed = false;
 	let cacheRate: number | undefined; // last response: cacheRead / total prompt tokens
 	let averageTps: number | undefined; // memory-only smoothing: (previous average + latest response rate) / 2
-	let genStart: number | undefined; // time of first streamed delta
+	let answerStart: number | undefined; // first non-empty answer-text delta, excluding reasoning
 	let cost = 0;
 	let requestRender: (() => void) | undefined;
 	let refreshing = false;
@@ -309,7 +309,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_e, ctx) => {
 		averageTps = undefined;
-		genStart = undefined;
+		answerStart = undefined;
 		if (enabled) install(ctx);
 	});
 	pi.on("agent_start", (_e, _ctx) => {
@@ -322,23 +322,34 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("message_start", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
-		genStart = undefined;
+		answerStart = undefined;
 	});
 	pi.on("message_update", (e, _ctx) => {
-		if (!e.assistantMessageEvent.type.endsWith("_delta")) return;
-		genStart ??= Date.now();
+		const ev = e.assistantMessageEvent;
+		if (ev.type !== "text_delta" || ev.delta.length === 0) return;
+		answerStart ??= Date.now();
 	});
 	pi.on("message_end", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
 		const m = e.message as AssistantMessage;
-		if (genStart !== undefined && m.stopReason !== "error" && m.stopReason !== "aborted") {
-			const elapsed = (Date.now() - genStart) / 1000;
-			if (elapsed >= 0.3 && Number.isFinite(m.usage.output) && m.usage.output > 0) {
-				const responseTps = m.usage.output / elapsed;
-				averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
+		const finalAnswer = (m.stopReason === "stop" || m.stopReason === "length") &&
+			!m.content.some(block => block.type === "toolCall");
+		if (answerStart !== undefined && finalAnswer) {
+			const elapsed = (Date.now() - answerStart) / 1000;
+			// Output includes reasoning tokens, whose generation may precede the
+			// visible stream. Count only answer tokens over answer delivery time.
+			const reasoning = m.usage.reasoning ?? 0;
+			const answerTokens = m.usage.output - reasoning;
+			const unknownReasoning = m.usage.reasoning === undefined && m.content.some(block => block.type === "thinking");
+			if (elapsed >= 0.3 && Number.isFinite(m.usage.output) && Number.isFinite(reasoning) &&
+				reasoning >= 0 && answerTokens > 0 && !unknownReasoning) {
+				const responseTps = answerTokens / elapsed;
+				if (Number.isFinite(responseTps)) {
+					averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
+				}
 			}
 		}
-		genStart = undefined;
+		answerStart = undefined;
 		cacheRate = cacheRateOf(m);
 		requestRender?.();
 	});

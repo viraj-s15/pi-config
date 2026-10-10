@@ -38,16 +38,16 @@ function fixture(t: TestContext) {
     assert.ok(match, "footer should display a numeric TPS segment");
     return Number(match[1]);
   };
-  const delta = (type = "text_delta") => emit("message_update", { assistantMessageEvent: { type, delta: "x".repeat(400) } });
-  const end = (output: number, stopReason = "stop", role = "assistant") => emit("message_end", { message: {
-    role, stopReason,
-    usage: { input: 0, output, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  const delta = (type = "text_delta", text = "x".repeat(400)) => emit("message_update", { assistantMessageEvent: { type, delta: text } });
+  const end = (output: number, stopReason = "stop", role = "assistant", reasoning?: number) => emit("message_end", { message: {
+    role, stopReason, content: [{ type: "text", text: "answer" }],
+    usage: { input: 0, output, reasoning, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
   }});
-  const response = (output: number, milliseconds = 1000, stopReason = "stop") => {
+  const response = (output: number, milliseconds = 1000, stopReason = "stop", reasoning?: number) => {
     emit("message_start", { message: { role: "assistant" } });
     delta();
     t.mock.timers.tick(milliseconds);
-    end(output, stopReason);
+    end(output, stopReason, "assistant", reasoning);
   };
   return { emit, text, rate, delta, end, response, register, branch };
 }
@@ -98,9 +98,9 @@ test("tool time and pre-token waiting are excluded from the next response's rate
   t.mock.timers.tick(60000);
   f.emit("message_start", { message: { role: "assistant" } });
   t.mock.timers.tick(5000);
-  f.delta("thinking_delta");
+  f.delta();
   t.mock.timers.tick(1000);
-  f.end(20, "toolUse");
+  f.end(20);
   assert.equal(f.rate(), 60);
 });
 
@@ -167,6 +167,111 @@ test("reloading extension state begins a fresh in-memory average", t => {
   assert.equal(f.rate(), 0);
   f.response(20);
   assert.equal(f.rate(), 20);
+});
+
+test("hidden reasoning is subtracted before computing and blending answer TPS", t => {
+  const f = fixture(t);
+  // 200 answer tokens over 5 seconds = 40 TPS, not 84 total-output TPS.
+  f.response(420, 5000, "stop", 220);
+  assert.equal(f.rate(), 40);
+  // 20 answer tokens over 1 second blends with the previous 40 to give 30.
+  f.response(400, 1000, "stop", 380);
+  assert.equal(f.rate(), 30);
+});
+
+test("the observed 392-output/217-reasoning reply is sampled as 175 answer tokens", t => {
+  const f = fixture(t);
+  f.response(392, 5000, "stop", 217);
+  assert.equal(f.rate(), 35);
+});
+
+test("reasoning and tool-argument deltas cannot start the answer-text clock", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("thinking_delta");
+  t.mock.timers.tick(10000);
+  f.delta("toolcall_delta");
+  t.mock.timers.tick(10000);
+  f.delta();
+  t.mock.timers.tick(1000);
+  f.end(420, "stop", "assistant", 380);
+  assert.equal(f.rate(), 40);
+});
+
+test("an empty text delta cannot start timing before answer text is delivered", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("text_delta", "");
+  t.mock.timers.tick(10000);
+  f.delta();
+  t.mock.timers.tick(1000);
+  f.end(40);
+  assert.equal(f.rate(), 40);
+});
+
+test("tool-call responses with commentary do not pollute the answer average", t => {
+  const f = fixture(t);
+  f.response(40);
+  f.response(500, 1000, "toolUse", 100);
+  assert.equal(f.rate(), 40);
+  f.response(20);
+  assert.equal(f.rate(), 30);
+});
+
+test("tool-call-only and reasoning-only bursts cannot initialize the average", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("toolcall_delta");
+  t.mock.timers.tick(1000);
+  f.end(500, "toolUse");
+  assert.equal(f.rate(), 0);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("thinking_delta");
+  t.mock.timers.tick(1000);
+  f.end(500, "stop", "assistant", 500);
+  assert.equal(f.rate(), 0);
+});
+
+test("a tool call in finalized content excludes that message even with stop reason stop", t => {
+  const f = fixture(t);
+  f.response(40);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  t.mock.timers.tick(1000);
+  f.emit("message_end", { message: {
+    role: "assistant", stopReason: "stop", content: [{ type: "text", text: "commentary" },
+      { type: "toolCall", id: "call", name: "read", arguments: { path: "file" } }],
+    usage: { input: 0, output: 500, reasoning: 100, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }});
+  assert.equal(f.rate(), 40);
+});
+
+test("invalid reasoning breakdowns do not create inflated or negative samples", t => {
+  const f = fixture(t);
+  f.response(40);
+  for (const reasoning of [-20, 101, Number.NaN, Number.POSITIVE_INFINITY, 100]) {
+    f.response(100, 1000, "stop", reasoning);
+    assert.equal(f.rate(), 40);
+  }
+});
+
+test("reported reasoning is excluded from truncated final answers too", t => {
+  const f = fixture(t);
+  f.response(420, 1000, "length", 380);
+  assert.equal(f.rate(), 40);
+});
+
+test("thinking without a reported token breakdown is skipped rather than counted as answer tokens", t => {
+  const f = fixture(t);
+  f.response(40);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  t.mock.timers.tick(1000);
+  f.emit("message_end", { message: {
+    role: "assistant", stopReason: "stop", content: [{ type: "thinking", thinking: "reasoning" }, { type: "text", text: "answer" }],
+    usage: { input: 0, output: 500, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }});
+  assert.equal(f.rate(), 40);
 });
 
 test("fractional TPS keeps existing low-rate decimal formatting", t => {

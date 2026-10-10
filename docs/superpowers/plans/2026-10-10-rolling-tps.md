@@ -4,7 +4,7 @@
 
 **Goal:** Replace live footer TPS with one memory-only smoothed response-rate number.
 
-**Architecture:** Retain the existing first-delta timestamp and finalize a rate at `message_end`. Blend that rate into one closure variable and render it between turns; remove all live estimation and reset-timer state.
+**Architecture:** Record the first non-empty answer-text delta and finalize a non-reasoning output rate at `message_end` for final answers without tool calls. Blend that rate into one closure variable and render it between turns; remove all live estimation and reset-timer state.
 
 **Tech Stack:** TypeScript, installed Pi APIs, Node test runner with mocked Date/timers, jiti.
 
@@ -25,8 +25,8 @@ Modify only the TPS portions of `agent/extensions/oxo-ui/index.ts`.
 - [ ] Replace live/reset/character-count state with `let averageTps: number | undefined;` and the existing first-delta timestamp.
 - [ ] Render `averageTps` with the existing decimal formatting plus `avg t/s`.
 - [ ] Remove idle-reset scheduling from agent lifecycle handlers.
-- [ ] At assistant `message_start`, clear the timestamp. At the first `_delta`, record `Date.now()` without updating the meter.
-- [ ] At assistant `message_end`, validate elapsed time/output/stop reason, compute `responseTps = output / elapsed`, then assign `averageTps === undefined ? responseTps : (averageTps + responseTps) / 2`; clear the timestamp.
+- [ ] At assistant `message_start`, clear the timestamp. At the first non-empty `text_delta`, record `Date.now()` without updating the meter.
+- [ ] At assistant `message_end`, accept only final `stop`/`length` messages without tool calls. Validate elapsed time and token breakdown; skip unreported reasoning when thinking content is present. Compute `responseTps = (output - reasoning) / elapsed`, then assign `averageTps === undefined ? responseTps : (averageTps + responseTps) / 2`; clear the timestamp.
 - [ ] At `session_start`, clear both the average and pending timing.
 - [ ] Run the new suite, the `/btw` suite, strict TypeScript checking and `git diff --check`.
 
@@ -38,4 +38,8 @@ Modify only the TPS portions of `agent/extensions/oxo-ui/index.ts`.
 
 ## Execution result
 
-Implemented all tasks. The original footer failed 10 of the 12 new tests; after the minimal change, all 12 pass. All 25 `/btw` regression tests also pass. Strict TypeScript checking, whitespace checking and the installed Pi extension-load smoke test pass. Read-only review found no blocking findings. No timing/state persistence was added. Changes are uncommitted and load with `/reload`.
+Implemented all tasks. The original footer failed 10 of the 12 new tests; after the minimal change, all 12 pass. All 25 `/btw` regression tests also pass. Strict TypeScript checking, whitespace checking and the installed Pi extension-load smoke test pass. Read-only review found no blocking findings. No timing/state persistence was added. Changes load with `/reload`.
+
+### Measurement correction
+
+The user later observed inflated readings. Actual OpenAI usage showed a final reply with 392 output tokens including 217 hidden reasoning tokens, leaving 175 answer tokens. The prior meter counted total output over a stream interval that could omit reasoning time and also sampled tool-call responses. The corrected measurement excludes reasoning tokens and tool-call messages, starts at the first non-empty answer-text delta, and skips ambiguous/invalid token breakdowns. Ten new regression tests failed against the old measurement, including a 392/217-token case, and pass after the correction. The one-number rolling formula and memory-only storage remain unchanged.

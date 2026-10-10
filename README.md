@@ -45,7 +45,7 @@ cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
 - `models.json`: 900K context for the OpenAI GPT-6 and GPT-5.6 models
 - Subagents have no predefined roles. Each call defines its own prompt, tools and model. The default is `openai/gpt-6-luna` at high effort.
 - `settings.json`: OpenAI GPT-6.1 Sol (900K) at high effort, auto-compaction off, `oxocarbon-grey` theme
-- Footer `avg t/s`: an in-memory rolling average, updated after each response as `(previous average + latest response TPS) / 2`. It stays visible between turns; changing sessions or `/reload` resets it. Nothing is saved.
+- Footer `avg t/s`: an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, excluding tool-call responses. It stays visible between turns; changing sessions or `/reload` resets it. Nothing is saved.
 
 ## LaTeX images
 
