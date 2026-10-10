@@ -125,7 +125,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 
 ## Optional
 
-- `/usage` also reads Codex quota from `~/.codex/auth.json` (Codex CLI login) and Antigravity quota from the `agy` CLI.
+- `/usage` also reads Codex quota and Antigravity quota (from the `agy` CLI). It uses the Codex CLI login in `~/.codex/auth.json` and refreshes it automatically when it expires, so you do not need to run `codex` yourself. If the login was revoked, it asks you to run `codex login`. `CODEX_HOME` is respected.
 - Todo files are written to `.pi/todos/` in each project.
 
 ## Tests
@@ -136,6 +136,7 @@ From the repository root:
 node tests/run.mjs         # all tests
 node tests/run.mjs btw     # side-question tests only
 node tests/run.mjs oxo-ui  # footer tests only
+node tests/run.mjs usage   # Codex login refresh tests only
 ```
 
 Tests use Node's test runner and the packages from Pi's managed installation; no additional install is needed. Set `PI_MANAGED_INSTALL_ROOT` if Pi is installed somewhere other than `~/.pi/agent/install`.

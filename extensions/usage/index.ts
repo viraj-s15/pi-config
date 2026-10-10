@@ -1,9 +1,10 @@
 /**
  * /usage: subscription quota for Anthropic (Claude), OpenAI Codex (ChatGPT) and Antigravity.
  *
- * Read-only: tokens are read from disk, never written or refreshed here.
+ * Anthropic tokens are only read; Pi refreshes its own when you send a message.
+ * The Codex login in ~/.codex/auth.json is refreshed here when it expires (see codex-auth.ts).
  *   Anthropic   GET api.anthropic.com/api/oauth/usage      token: pi auth.json, else ~/.claude/.credentials.json
- *   Codex       GET chatgpt.com/backend-api/wham/usage     token: ~/.codex/auth.json, else pi auth.json
+ *   Codex       GET chatgpt.com/backend-api/wham/usage     token: ~/.codex/auth.json (Pi's own OpenAI token is not accepted)
  *   Antigravity `agy -p /usage --output-format json`        (answered locally by agy, no model turn)
  *
  * Keys in the overlay: r = refresh, esc / q / enter = close.
@@ -15,6 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { withCodexCredentials } from "./codex-auth.ts";
 
 // ---------- palette (oxocarbon-grey) ----------
 type RGB = [number, number, number];
@@ -64,10 +66,11 @@ function readJson(path: string): any {
 }
 
 class UsageError extends Error {}
+class TokenRejected extends UsageError {}
 
 async function getJson(url: string, headers: Record<string, string>): Promise<any> {
 	const res = await fetch(url, { headers: { Accept: "application/json", ...headers }, signal: AbortSignal.timeout(10_000) });
-	if (res.status === 401 || res.status === 403) throw new UsageError(`token rejected (HTTP ${res.status})`);
+	if (res.status === 401 || res.status === 403) throw new TokenRejected(`token rejected (HTTP ${res.status})`);
 	if (!res.ok) throw new UsageError(`HTTP ${res.status}`);
 	return res.json();
 }
@@ -146,27 +149,19 @@ function windowLabel(seconds: number | undefined, fallback: string): string {
 }
 
 async function fetchCodex(): Promise<Partial<Section>> {
-	const candidates: { token: string; account?: string }[] = [];
-	const codex = readJson(join(HOME, ".codex", "auth.json"))?.tokens;
-	if (codex?.access_token) candidates.push({ token: codex.access_token, account: codex.account_id });
-	const pi = readJson(join(PI_DIR, "auth.json"))?.openai;
-	if (pi?.access && (!pi.expires || pi.expires > Date.now())) candidates.push({ token: pi.access });
-	if (!candidates.length) throw new UsageError("not signed in (run `codex login`)");
-
-	let d: any;
-	let lastErr: unknown;
-	for (const c of candidates) {
-		try {
-			d = await getJson("https://chatgpt.com/backend-api/wham/usage", {
+	let usage: { value: any; warning?: string };
+	try {
+		usage = await withCodexCredentials(
+			(c) => getJson("https://chatgpt.com/backend-api/wham/usage", {
 				Authorization: `Bearer ${c.token}`,
 				...(c.account ? { "ChatGPT-Account-Id": c.account } : {}),
-			});
-			break;
-		} catch (e) {
-			lastErr = e;
-		}
+			}),
+			(e) => e instanceof TokenRejected,
+		);
+	} catch (e) {
+		throw e instanceof TokenRejected ? new UsageError("token rejected even after refreshing: run `codex login`") : e;
 	}
-	if (!d) throw lastErr instanceof UsageError && /rejected/.test(lastErr.message) ? new UsageError("token rejected: run `codex` once to refresh login") : lastErr;
+	const d = usage.value;
 
 	const rl = d.rate_limit ?? {};
 	const wins: Win[] = [];
@@ -187,6 +182,7 @@ async function fetchCodex(): Promise<Partial<Section>> {
 	const extra: string[] = [];
 	const bal = d.credits?.balance;
 	if (d.credits?.has_credits && bal !== undefined) extra.push(`credits balance: ${bal}`);
+	if (usage.warning) extra.push(usage.warning);
 	if (!wins.length) throw new UsageError("no quota windows returned");
 	return { plan: typeof d.plan_type === "string" ? d.plan_type : undefined, wins, extra };
 }
