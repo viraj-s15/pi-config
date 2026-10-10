@@ -4,7 +4,7 @@
  * - Editor: thick blue top/bottom rules (no side bars) and a ❯ arrow before the input.
  * - Footer: powerlevel10k "rainbow" style with rounded caps (needs a Nerd Font):
  *     left : status, dir, git (branch, ahead/behind, +staged !modified ?untracked)
- *     right: extension statuses, cache hit %, cost, t/s, context tokens, model + thinking
+ *     right: extension statuses, cache hit %, cost, rolling avg t/s, context tokens, model + thinking
  *
  * Commands: /oxo  toggles the whole thing (falls back to pi defaults).
  * Palette comes from ~/Documents/github/oxocarbon-grey (palette.lua).
@@ -190,12 +190,8 @@ export default function (pi: ExtensionAPI) {
 	let git: GitInfo | undefined;
 	let lastFailed = false;
 	let cacheRate: number | undefined; // last response: cacheRead / total prompt tokens
-	let tps = 0; // generation speed, tokens/sec: live while streaming, held briefly after the run, then back to 0
-	let tpsReset: ReturnType<typeof setTimeout> | undefined;
-	const TPS_HOLD_MS = 10000; // how long the last speed stays visible once the agent goes idle
+	let averageTps: number | undefined; // memory-only smoothing: (previous average + latest response rate) / 2
 	let genStart: number | undefined; // time of first streamed delta
-	let genChars = 0;
-	let lastLiveRender = 0;
 	let cost = 0;
 	let requestRender: (() => void) | undefined;
 	let refreshing = false;
@@ -277,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 					if (statuses.length) optional.push(seg(P.panel, statuses.join(" "), P.text));
 					optional.push(seg(P.panel, `\uF1C0 ${cacheRate !== undefined ? `${Math.round(cacheRate * 100)}%` : "–"} cache`, P.text));
 					if (cost > 0) optional.push(seg(P.green, `$${cost.toFixed(3)}`));
-					optional.push(seg(P.cyan, `\uF0E7 ${tps === 0 ? "0" : tps.toFixed(tps < 10 ? 1 : 0)} t/s`));
+					optional.push(seg(P.cyan, `\uF0E7 ${averageTps === undefined ? "0" : averageTps.toFixed(averageTps < 10 ? 1 : 0)} avg t/s`));
 					const required: Seg[] = [];
 					if (usage?.percent != null) {
 						const pct = usage.percent;
@@ -312,48 +308,35 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_e, ctx) => {
-		tps = 0;
+		averageTps = undefined;
+		genStart = undefined;
 		if (enabled) install(ctx);
 	});
 	pi.on("agent_start", (_e, _ctx) => {
 		running = true;
-		clearTimeout(tpsReset);
 		requestRender?.();
 	});
 	pi.on("agent_end", (_e, ctx) => {
 		running = false;
-		// short answers finish in a couple of seconds, so keep the last speed readable before dropping to 0
-		clearTimeout(tpsReset);
-		tpsReset = setTimeout(() => {
-			tps = 0;
-			requestRender?.();
-		}, TPS_HOLD_MS);
 		refresh(ctx);
 	});
 	pi.on("message_start", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
 		genStart = undefined;
-		genChars = 0;
 	});
 	pi.on("message_update", (e, _ctx) => {
-		const ev = e.assistantMessageEvent;
-		if (!ev.type.endsWith("_delta")) return;
-		const now = Date.now();
-		genStart ??= now;
-		genChars += ((ev as { delta?: string }).delta ?? "").length;
-		const elapsed = (now - genStart) / 1000;
-		if (elapsed >= 0.5 && now - lastLiveRender >= 250) {
-			lastLiveRender = now;
-			tps = genChars / 4 / elapsed; // rough: ~4 chars per token
-			requestRender?.();
-		}
+		if (!e.assistantMessageEvent.type.endsWith("_delta")) return;
+		genStart ??= Date.now();
 	});
 	pi.on("message_end", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
 		const m = e.message as AssistantMessage;
-		if (genStart !== undefined) {
+		if (genStart !== undefined && m.stopReason !== "error" && m.stopReason !== "aborted") {
 			const elapsed = (Date.now() - genStart) / 1000;
-			if (elapsed >= 0.3 && m.usage.output > 0) tps = m.usage.output / elapsed;
+			if (elapsed >= 0.3 && Number.isFinite(m.usage.output) && m.usage.output > 0) {
+				const responseTps = m.usage.output / elapsed;
+				averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
+			}
 		}
 		genStart = undefined;
 		cacheRate = cacheRateOf(m);
