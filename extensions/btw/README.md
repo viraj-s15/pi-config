@@ -31,12 +31,12 @@ The command requires interactive terminal mode. There is no fork command or fork
 
 ## Load and test
 
-This repository's `agent/extensions/` is already linked to `~/.pi/agent/extensions/`. Run `/reload` in Pi to load the command.
+This repository's `extensions/` is already linked to `~/.pi/agent/extensions/`. Run `/reload` in Pi to load the command.
 
 From the repository root:
 
 ```sh
-node agent/extensions/btw/tests/run.mjs
+node extensions/btw/tests/run.mjs
 ```
 
 The tests use Node's test runner, the installed Pi packages and its `jiti` TypeScript loader. No extra dependencies are needed. The test runner supports Pi's managed installation layout and the `PI_MANAGED_INSTALL_ROOT` override. Automated tests do not make paid provider requests.

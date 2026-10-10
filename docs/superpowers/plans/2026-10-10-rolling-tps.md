@@ -10,17 +10,17 @@
 
 ## Task 1: Failing regression tests
 
-Create `agent/extensions/oxo-ui/tests/run.mjs` using the same installed-Pi package resolution as the `/btw` test runner. Create `tests/rolling-tps.test.ts` that registers the real extension into a minimal event/UI host, captures the real footer and drives assistant events using Node's fake clock.
+Create `extensions/oxo-ui/tests/run.mjs` using the same installed-Pi package resolution as the `/btw` test runner. Create `tests/rolling-tps.test.ts` that registers the real extension into a minimal event/UI host, captures the real footer and drives assistant events using Node's fake clock.
 
 - [ ] Assert rates 100, 20, 40 yield displayed averages 100, 60, 50, not 100, 20, 40.
 - [ ] Assert streaming deltas leave the previous average unchanged.
 - [ ] Assert `agent_end` plus 30 seconds idle does not clear the meter.
 - [ ] Assert `avg t/s` label, invalid-response filtering, short-response filtering, user-message exclusion, per-response timing reset and session/reload reset.
-- [ ] Run `node agent/extensions/oxo-ui/tests/run.mjs`; observe failures against the original live-TPS implementation.
+- [ ] Run `node extensions/oxo-ui/tests/run.mjs`; observe failures against the original live-TPS implementation.
 
 ## Task 2: Minimal footer changes
 
-Modify only the TPS portions of `agent/extensions/oxo-ui/index.ts`.
+Modify only the TPS portions of `extensions/oxo-ui/index.ts`.
 
 - [ ] Replace live/reset/character-count state with `let averageTps: number | undefined;` and the existing first-delta timestamp.
 - [ ] Render `averageTps` with the existing decimal formatting plus `avg t/s`.

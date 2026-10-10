@@ -2,7 +2,7 @@
  * compact-tools: one-line bullets instead of boxed tool blocks.
  *
  *   ● Bash(git status --short)            yellow while running, green when done, red on error
- *   ● Update(agent/extensions/x.ts)
+ *   ● Update(extensions/x.ts)
  *   ● Read(README.md:1-40)  1.2s
  *     ⎿ error text                         only shown when a tool fails
  *

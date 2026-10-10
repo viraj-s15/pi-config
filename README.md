@@ -28,15 +28,18 @@ git clone https://github.com/viraj-s15/pi-config.git ~/Documents/github/pi-confi
 REPO=~/Documents/github/pi-config
 mkdir -p ~/.pi/agent
 
+# Git does not track empty directories; ensure the optional prompts folder exists.
+mkdir -p "$REPO/prompts"
+
 # removes any existing copies of these folders
-for d in extensions skills themes; do
+for d in extensions skills themes prompts; do
   rm -rf ~/.pi/agent/$d
-  ln -s $REPO/agent/$d ~/.pi/agent/$d
+  ln -s "$REPO/$d" ~/.pi/agent/$d
 done
-ln -sf $REPO/agent/models.json ~/.pi/agent/models.json
+ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 
 # settings are copied, not linked, because pi rewrites them. Skipped if you already have one.
-cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
+cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
 - `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
@@ -50,7 +53,7 @@ cp -n $REPO/agent/settings.json ~/.pi/agent/settings.json
 ## LaTeX images
 
 ```bash
-npm install --prefix ~/Documents/github/pi-config/agent/extensions/latex-images
+npm install --prefix ~/Documents/github/pi-config/extensions/latex-images
 ```
 
 - Needs a terminal with Kitty graphics. Elsewhere it falls back to plain text math.
@@ -98,7 +101,7 @@ curl -s "http://127.0.0.1:8888/search?q=test&format=json" | head -c 200
 
 ```bash
 REPO=~/Documents/github/pi-config
-chmod +x $REPO/agent/bin/start-search-runtime
+chmod +x "$REPO/bin/start-search-runtime"
 mkdir -p ~/Library/LaunchAgents
 
 cat > ~/Library/LaunchAgents/com.veer.pi-search-startup.plist <<PLIST
@@ -107,7 +110,7 @@ cat > ~/Library/LaunchAgents/com.veer.pi-search-startup.plist <<PLIST
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.veer.pi-search-startup</string>
-  <key>ProgramArguments</key><array><string>$REPO/agent/bin/start-search-runtime</string></array>
+  <key>ProgramArguments</key><array><string>$REPO/bin/start-search-runtime</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>60</integer>
@@ -128,7 +131,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 ## Commands
 
 - `/reload`: reload extensions after editing them
-- `/btw <question>`: answer a side question with the current model and chat context, without adding it to chat history (no tools; works while the agent is busy). Bare `/btw` reopens the last answer. [Controls and details](agent/extensions/btw/README.md).
+- `/btw <question>`: answer a side question with the current model and chat context, without adding it to chat history (no tools; works while the agent is busy). Bare `/btw` reopens the last answer. [Controls and details](extensions/btw/README.md).
 - `/oxo`: toggle the custom input box and footer
 - `/verbs on|off`: Claude Code style spinner with random verbs
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block

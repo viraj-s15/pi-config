@@ -1,4 +1,4 @@
-agent/auth.json
-agent/sessions/
-agent/extensions/*/node_modules/
+/auth.json
+/sessions/
+/extensions/*/node_modules/
 .pi/todos/

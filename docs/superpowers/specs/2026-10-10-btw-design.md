@@ -17,13 +17,13 @@ Approved by the user: reproduce Claude Code's core `/btw` behavior, explicitly w
 
 ## Architecture
 
-`agent/extensions/btw/context.ts` prepares immutable provider context using Pi's context projection and message conversion, stripping executable tool declarations and repairing unfinished tool-call pairs. Completed historical tool calls/results are replayed as labelled text, preserving result images, because some providers require declared tools when receiving native tool-use blocks. Earlier side answers are replayed as explicitly labelled context rather than fabricated provider responses.
+`extensions/btw/context.ts` prepares immutable provider context using Pi's context projection and message conversion, stripping executable tool declarations and repairing unfinished tool-call pairs. Completed historical tool calls/results are replayed as labelled text, preserving result images, because some providers require declared tools when receiving native tool-use blocks. Earlier side answers are replayed as explicitly labelled context rather than fabricated provider responses.
 
-`agent/extensions/btw/thread.ts` owns the memory-only side thread, independent AbortController, bounded history and streaming request lifecycle.
+`extensions/btw/thread.ts` owns the memory-only side thread, independent AbortController, bounded history and streaming request lifecycle.
 
-`agent/extensions/btw/overlay.ts` implements a themed, bounded Markdown overlay with keyboard navigation and clipboard support.
+`extensions/btw/overlay.ts` implements a themed, bounded Markdown overlay with keyboard navigation and clipboard support.
 
-`agent/extensions/btw/index.ts` registers the command and lifecycle cleanup, taking the current session snapshot and connecting the thread and UI.
+`extensions/btw/index.ts` registers the command and lifecycle cleanup, taking the current session snapshot and connecting the thread and UI.
 
 ## Verification
 
