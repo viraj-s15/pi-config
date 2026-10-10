@@ -4,6 +4,7 @@ import { createTestLoader } from "./pi-runtime.mjs";
 const suites = {
   btw: "../extensions/btw/tests/btw.test.ts",
   "oxo-ui": "../extensions/oxo-ui/tests/rolling-tps.test.ts",
+  "paste-fold": "../extensions/paste-fold/tests/paste-fold.test.ts",
   "image-paste": ["../extensions/image-paste/tests/attach.test.ts", "../extensions/image-paste/tests/clipboard.test.ts"],
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };

@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), image-paste (attach pasted images), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -56,7 +56,16 @@ cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 
 The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `avg t/s`, context usage and the model.
 
-- `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens from the first answer-text delta to completion, and ignores tool-call responses. It shows `–` until the first final answer of a session, and stays visible between turns. `/reload` keeps it (held in process memory). A new, resumed or forked session starts over, and nothing is written to disk. Turns that end in tool calls add no sample, so a long run of tool use leaves it unchanged.
+- `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens over the time the answer text took to arrive (first to last text chunk), and ignores tool-call responses. An answer only counts if its text streamed for at least a second with no single pause taking up more than half of that window. Some answers arrive in one burst (Sonnet 5.5 with thinking does this) and would otherwise report thousands of t/s, so they are skipped. Checked against OpenRouter's median for Claude Sonnet 5.5 (about 111 t/s): the footer read 109 to 110 on live answers. It shows `–` until the first final answer of a session, and stays visible between turns. `/reload` keeps it (held in process memory). A new, resumed or forked session starts over, and nothing is written to disk. Turns that end in tool calls add no sample, so a long run of tool use leaves it unchanged.
+
+## Big pastes
+
+Pi folds a large paste into a marker such as `[paste #1 2314 chars]` and still sends the full text. It does this for more than 10 lines or 1000 characters. `paste-fold` lowers the character limit to **500** and lets you **click a marker to expand it** in place, with the cursor left after the text. `Ctrl+Z` folds it back.
+
+- Clicks only reach Pi in fullscreen mode, which is Pi's default (`tuiMode`). In regular mode the terminal keeps the mouse, so markers stay folded, but they are still sent in full.
+- Only a left click on the marker counts. Moving the cursor onto it with the keyboard, or clicking the text around it, does nothing.
+- It wraps two methods of Pi's editor and relies on its marker numbering, so a Pi update that changes those internals makes it fall back to Pi's own behavior. The tests run against Pi's real editor and will show it.
+- This is the editor only. Once you send the message, the transcript shows the full text as before.
 
 ## Image paste
 

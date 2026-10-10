@@ -58,14 +58,21 @@ function fixture(t: TestContext) {
     role, stopReason, content: [{ type: "text", text: "answer" }],
     usage: { input: 0, output, reasoning, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
   }});
+  /** Text arriving steadily: a delta every milliseconds/steps, the last one exactly milliseconds from now. */
+  const stream = (milliseconds: number, steps = 10) => {
+    for (let i = 0; i < steps; i++) {
+      t.mock.timers.tick(milliseconds / steps);
+      delta();
+    }
+  };
   const response = (output: number, milliseconds = 1000, stopReason = "stop", reasoning?: number) => {
     emit("message_start", { message: { role: "assistant" } });
     delta();
-    t.mock.timers.tick(milliseconds);
+    stream(milliseconds);
     end(output, stopReason, "assistant", reasoning);
   };
   return {
-    emit, text, shows, rate, delta, end, response, register, branch,
+    emit, text, shows, rate, delta, stream, end, response, register, branch,
     branchScans: () => branchScans,
     navigate: (nextLeafId: string) => { leafId = nextLeafId; emit("session_tree"); },
     changeGitBranch: () => branchChanged?.(),
@@ -138,10 +145,9 @@ test("streaming leaves the previous completed average unchanged", t => {
   f.emit("agent_start");
   f.emit("message_start", { message: { role: "assistant" } });
   f.delta();
-  t.mock.timers.tick(1000);
-  f.delta();
+  f.stream(1000);
   assert.equal(f.rate(), 40);
-  t.mock.timers.tick(1000);
+  f.stream(1000);
   f.end(40);
   assert.equal(f.rate(), 30); // blend 40 with the new 20 t/s response
 });
@@ -163,7 +169,7 @@ test("tool time and pre-token waiting are excluded from the next response's rate
   f.emit("message_start", { message: { role: "assistant" } });
   t.mock.timers.tick(5000);
   f.delta();
-  t.mock.timers.tick(1000);
+  f.stream(1000);
   f.end(20);
   assert.equal(f.rate(), 60);
 });
@@ -177,7 +183,7 @@ test("errored and aborted responses do not change the average", t => {
   assert.equal(f.rate(), 100);
 });
 
-test("zero/non-finite output and sub-0.3-second responses are ignored", t => {
+test("zero/non-finite output and responses streamed for under a second are ignored", t => {
   const f = fixture(t);
   f.response(100);
   f.response(0);
@@ -202,10 +208,10 @@ test("user messages cannot change TPS or reset an assistant's pending timing", t
   f.response(100);
   f.emit("message_start", { message: { role: "assistant" } });
   f.delta();
-  t.mock.timers.tick(500);
+  f.stream(500);
   f.emit("message_start", { message: { role: "user" } });
   f.end(10, "stop", "user");
-  t.mock.timers.tick(500);
+  f.stream(500);
   f.end(20);
   assert.equal(f.rate(), 60);
 });
@@ -355,12 +361,19 @@ test("sanitized OpenAI Responses protocol fixture normalizes reasoning, tool use
   assert.equal(f.shows(), "–", "tool-use turn does not initialize TPS");
 
   f.emit("message_start", { message: { role: "assistant" } });
+  // The fixture has two coarse text events; replay them as one-character slices 100 ms apart, the way
+  // a steady stream arrives, so the answer is measured over a real window.
+  let slices = 0;
   for (const event of finalAnswer.normalized) {
-    f.emit("message_update", { assistantMessageEvent: event });
-    if (event.type === "text_delta") t.mock.timers.tick(2500);
+    if (event.type !== "text_delta") { f.emit("message_update", { assistantMessageEvent: event }); continue; }
+    for (const char of event.delta) {
+      if (slices++) t.mock.timers.tick(100);
+      f.emit("message_update", { assistantMessageEvent: { ...event, delta: char } });
+    }
   }
   f.emit("message_end", { message: finalAnswer.message });
-  assert.equal(f.rate(), 35, "175 answer tokens over five seconds; reasoning is excluded");
+  const windowSeconds = ((slices - 1) * 100) / 1000;
+  assert.equal(f.rate(), Math.round(175 / windowSeconds), "175 answer tokens over the streaming window; reasoning is excluded");
 });
 
 test("reasoning and tool-argument deltas cannot start the answer-text clock", t => {
@@ -371,7 +384,7 @@ test("reasoning and tool-argument deltas cannot start the answer-text clock", t 
   f.delta("toolcall_delta");
   t.mock.timers.tick(10000);
   f.delta();
-  t.mock.timers.tick(1000);
+  f.stream(1000);
   f.end(420, "stop", "assistant", 380);
   assert.equal(f.rate(), 40);
 });
@@ -382,7 +395,7 @@ test("an empty text delta cannot start timing before answer text is delivered", 
   f.delta("text_delta", "");
   t.mock.timers.tick(10000);
   f.delta();
-  t.mock.timers.tick(1000);
+  f.stream(1000);
   f.end(40);
   assert.equal(f.rate(), 40);
 });
@@ -458,4 +471,98 @@ test("fractional TPS keeps existing low-rate decimal formatting", t => {
   assert.equal(f.rate(), 2.5);
   f.response(3, 2000);
   assert.equal(f.rate(), 2);
+});
+
+// ---- bursty and stalled streams (Sonnet 5.5 with thinking delivers its answer in one burst) ----
+
+test("an answer delivered in one burst is ignored: it has no streaming window to measure", t => {
+  const f = fixture(t);
+  f.response(100);
+  // As logged from a real thinking answer: 73 text chunks within 2 ms of each other.
+  f.emit("message_start", { message: { role: "assistant" } });
+  t.mock.timers.tick(3000);
+  for (let i = 0; i < 73; i++) f.delta();
+  f.end(398, "stop", "assistant", 83);
+  assert.equal(f.rate(), 100, "average unchanged");
+});
+
+test("a burst split in two by the network is still ignored", t => {
+  const f = fixture(t);
+  f.response(100);
+  f.emit("message_start", { message: { role: "assistant" } });
+  for (let i = 0; i < 40; i++) f.delta();
+  t.mock.timers.tick(400); // long enough to pass the old 0.3 s check, which then reported thousands of t/s
+  for (let i = 0; i < 40; i++) f.delta();
+  f.end(1200);
+  assert.equal(f.rate(), 100);
+});
+
+test("two bursts a couple of seconds apart are ignored too", t => {
+  const f = fixture(t);
+  f.response(100);
+  f.emit("message_start", { message: { role: "assistant" } });
+  for (let i = 0; i < 30; i++) f.delta();
+  t.mock.timers.tick(2000);
+  for (let i = 0; i < 30; i++) f.delta();
+  f.end(900);
+  assert.equal(f.rate(), 100, "a 2 s window with a 2 s gap is not a stream");
+});
+
+test("a stream that stalls for most of its window is ignored", t => {
+  const f = fixture(t);
+  f.response(100);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(1000);
+  t.mock.timers.tick(4000); // network stall
+  f.delta();
+  f.stream(1000);
+  f.end(600);
+  assert.equal(f.rate(), 100);
+});
+
+test("a short pause inside a steady stream is fine", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(3000);
+  t.mock.timers.tick(600);
+  f.delta();
+  f.stream(2000);
+  f.end(500);
+  assert.equal(f.rate(), 89, "500 tokens over the 5.6 s the text took to arrive");
+});
+
+test("the window runs to the last text chunk, not to the end of the message", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(2000);
+  t.mock.timers.tick(500); // usage and stop events arrive after the text
+  f.end(200);
+  assert.equal(f.rate(), 100);
+});
+
+test("a steady five-second stream reports its real rate", t => {
+  const f = fixture(t);
+  f.response(100);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(5000, 150);
+  f.end(630);
+  assert.equal(f.rate(), 113, "630 tokens in 5 s is 126 t/s, blended with the earlier 100");
+});
+
+test("the streaming window must reach one second", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(999);
+  f.end(50);
+  assert.equal(f.shows(), "–", "999 ms is too short");
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta();
+  f.stream(1000);
+  f.end(50);
+  assert.equal(f.rate(), 50, "1000 ms is enough");
 });
