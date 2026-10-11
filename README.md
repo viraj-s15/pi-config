@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user, notifications (background alerts), actions (searchable command palette)
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -57,6 +57,26 @@ cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `avg t/s`, context usage and the model.
 
 - `avg t/s` is an in-memory rolling average, updated after each final answer as `(previous average + latest answer TPS) / 2`. It counts non-reasoning output tokens over the time the answer text took to arrive (first to last text chunk), and ignores tool-call responses. An answer only counts if its text streamed for at least a second with no single pause taking up more than half of that window. Some answers arrive in one burst (Sonnet 5.5 with thinking does this) and would otherwise report thousands of t/s, so they are skipped. Checked against OpenRouter's median for Claude Sonnet 5.5 (about 111 t/s): the footer read 109 to 110 on live answers. It shows `–` until the first final answer of a session, and stays visible between turns. `/reload` keeps it (held in process memory). A new, resumed or forked session starts over, and nothing is written to disk. Turns that end in tool calls add no sample, so a long run of tool use leaves it unchanged.
+
+## Tool activity
+
+`compact-tools` shows an operation and its observed result on one compact row. Recognized test commands show reported pass/fail counts; Git commands show commit/push details; read, edit, write, and search calls summarize recognizable results. Unknown or complex shell commands keep their original command preview rather than getting a guessed label. Click a tool row or use `Ctrl+O` to see the full command and output.
+
+After the agent settles, **adjacent successful tool calls** collapse into a clickable group. Expanding it reveals the original tool rows and output. Calls from the current run stay visible while it works; failed and running calls never get grouped. Groups do not cross assistant messages or other intervening content, so the transcript's order stays intact. `/toolgroups off` restores individual rows; `/toolgroups on` enables grouping. `Ctrl+O` still reaches the original tools, including grouped ones. Mouse toggles need fullscreen mode.
+
+## Background notifications
+
+`notifications` sends a macOS desktop notification when Pi finishes, fails, or needs input from a blocking dialog, **only after the terminal reports that it is unfocused**. It waits for the final settled outcome, not each tool or intermediate retry; aborted runs are silent. Notification text contains only the project name and a fixed status, not your prompts or command output.
+
+- `/notify on|off|status` controls notifications for the current runtime.
+- Unknown focus is treated as focused. Fullscreen Pi enables terminal focus reports; actual delivery also depends on macOS notification permissions and settings.
+- Tests mock delivery and verify the notification process arguments; they do not produce desktop notifications or make provider requests.
+
+## Action palette
+
+Open `/actions` or press **Ctrl+Shift+K** to search extension commands, skills, prompt templates, and common built-in actions. Use arrows to select, Enter to put the slash command in the editor, then Enter again to run it. Escape cancels without touching the draft. Opening and selecting in the palette does not call a model.
+
+If you already have a draft, the palette asks before replacing it and saves it in process memory. `/actions restore` (or the palette's restore item) recovers it; restoring over a different draft also asks first and keeps that draft recoverable. The backup survives `/reload`, not process exit. Ctrl+Shift+P remains Pi's existing reverse model-cycle shortcut.
 
 ## Big pastes
 
@@ -78,7 +98,12 @@ Pi folds a large paste into a marker such as `[paste #1 2314 chars]` and still s
 
 ## Image paste
 
-Pi's `Ctrl+V` saves a clipboard image to a temp file and types its path into the editor. `image-paste` turns image paths in a message you send into real attachments, so the model receives the picture and not just a filename.
+Pi's `Ctrl+V` saves a clipboard image to a temp file and inserts its path into the editor. With `oxo-ui` enabled, supported image paths are displayed as **`[Image 1 · filename.png ×]`** chips instead of long paths. `image-paste` turns the original image paths in a message you send into real attachments, so the model receives the picture and not just a filename.
+
+- Click a chip to inspect its filename, resolved path, size, and filename-based type; this is file information, not a thumbnail viewer. Click **×** to remove it. Removal is undoable.
+- **Ctrl+Shift+I** opens a keyboard chooser to inspect or remove images from your current draft. `/attachments <draft text>` also opens it and returns that text to the editor; bare `/attachments` reports any image paths available in the current draft.
+- Chips are display-only. Original paths, surrounding text, large-paste contents, and actual image bytes are preserved for submission. Arrow navigation treats paths as atomic chips; wrapping and Unicode filenames are supported. The attachment handler still verifies actual image bytes before sending.
+- With `/oxo` disabled, the default editor shows raw paths again, but attachment submission and the keyboard chooser still work.
 
 - Copy a screenshot (`Cmd+Ctrl+Shift+4` copies to the clipboard), press `Ctrl+V`, type your question and press Enter. Dragging a file into the terminal or typing a path works too, including `~/` paths, quoted paths and paths with spaces.
 - The message shows `[image 1: name.png]` where the path was. Only files that exist and really are images (checked by their bytes, not the extension) are attached. Anything else stays as typed. At most 8 images per message, and nothing over 32 MB.
@@ -196,7 +221,11 @@ The footer tests include a synthetic OpenAI Responses event sequence passed thro
 - `/oxo`: toggle the custom input box and footer
 - `/verbs on|off`: Claude Code style spinner with random verbs
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block
-- `/bullets on|off`: one-line tool bullets instead of boxed blocks (`Ctrl+O` expands a row, `/reload` redraws old rows)
+- `/bullets on|off`: operation/result tool summaries instead of boxed blocks (`Ctrl+O` expands original commands and output)
+- `/toolgroups on|off`: expandable groups of adjacent successful tools after the agent settles
+- `/notify on|off|status`: focus-aware background notifications
+- `/actions`: searchable command palette (`Ctrl+Shift+K`); `/actions restore` recovers a replaced draft
+- `/attachments`: draft image inspection/removal (`Ctrl+Shift+I` keeps the current draft)
 - `/usage`: quota windows for each provider, plus an API cost section: what the last 30 days of messages would have cost at API prices, summed across all saved sessions. It shows one stacked bar for each provider's share (OpenAI blue, Anthropic orange), a value multiple against your plan price (`PLANS` in `extensions/usage/index.ts`, currently $20 each), and a 30-day stacked column chart (rolling 24-hour buckets, oldest first). It is a rolling window, not tied to a billing cycle. Forked sessions are not double-counted. Subagent and `/btw` calls are not saved in sessions, so they are not included.
 - `/todos`: list todos
 - `/todo-widget [expand|collapse|on|off]`: todo line above the input (`Ctrl+Shift+E` expands it)

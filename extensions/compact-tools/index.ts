@@ -1,7 +1,8 @@
 /**
  * compact-tools: one-line bullets instead of boxed tool blocks.
  *
- *   ● Bash(git status --short)            yellow while running, green when done, red on error
+ *   ● Bash(Git push)                       yellow while running, green when done, red on error
+ *     ⎿ Git push origin/main · main → main
  *   ● Update(extensions/x.ts)
  *   ● Read(README.md:1-40)  1.2s
  *     ⎿ error text                         only shown when a tool fails
@@ -9,12 +10,14 @@
  * Ctrl+O expands a row to the tool's normal output (diffs, full command output, subagent results).
  * Hidden thinking blocks get the same bullet style (toggle thinking with Ctrl+T).
  *
- * Toggle: /bullets [on|off]. New tool rows follow the setting right away; run /reload to redraw old ones.
+ * Toggle: /bullets [on|off]. Group completed successes with /toolgroups [on|off].
  */
 
 import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { operationLabel, summarizeOperation } from "./summaries.ts";
+import { installToolGrouping } from "./tool-groups.ts";
 
 const fg = (rgb: [number, number, number], s: string) => `\x1b[38;2;${rgb.join(";")}m${s}\x1b[39m`;
 const C = {
@@ -36,6 +39,15 @@ class Lines implements Component {
 	invalidate(): void {}
 }
 const EMPTY = () => new Lines(() => []);
+const OBSERVED_RESULT = Symbol.for("pi-config.compact-tools.observed-result");
+const RECOGNIZED = new Set(["Tests", "Git commit", "Git push"]);
+
+/** "Tests 228 passed 0 failed" -> "228 passed · 0 failed"; "Git commit abc1234 · 2 files" -> "abc1234 · 2 files". */
+function resultAfter(label: string, summary: string): string {
+	if (summary === label || !summary.startsWith(`${label} `)) return "";
+	const rest = summary.slice(label.length + 1);
+	return rest.replace(/^(\d+ passed) (\d+ failed)$/, "$1 · $2");
+}
 
 const NAMES: Record<string, string> = {
 	bash: "Bash",
@@ -108,6 +120,8 @@ const textOf = (result: any): string =>
 
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
+	let groupsEnabled = true;
+	let grouping: ReturnType<typeof installToolGrouping> | undefined;
 
 	const applyThinkingLabel = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
@@ -124,12 +138,32 @@ export default function (pi: ExtensionAPI) {
 			renderCall(args: any, _theme: any, context: any) {
 				const pad = " ".repeat(context.outputPad ?? 1);
 				return new Lines((width) => {
+					if (toolName === "bash" && context.expanded && args?.command) {
+						const available = Math.max(1, width - (context.outputPad ?? 1) - 1);
+						return String(args.command)
+							.split("\n")
+							.flatMap((line: string) =>
+								wrapTextWithAnsi(line, available).map((part) => truncateToWidth(`${pad}${part}`, width)),
+							);
+					}
 					const failed = context.isError;
 					const running = context.isPartial;
 					const dot = fg(failed ? C.err : running ? C.run : C.ok, "●");
-					const detail = summarize(toolName, args ?? {});
-					let line = `${pad}${dot} ${bold(fg(C.text, titleCase(toolName)))}`;
-					if (detail) line += fg(C.faint, "(") + fg(C.dim, detail) + fg(C.faint, ")");
+					const label = toolName === "bash" ? operationLabel("bash", args ?? {}) : "";
+					const recognized = RECOGNIZED.has(label);
+					const observed = context.state?.[OBSERVED_RESULT];
+					let line: string;
+					if (recognized) {
+						// "Tests(228 passed · 0 failed)": the operation is named once, then what it observably did.
+						const rest = typeof observed === "string" ? resultAfter(label, observed) : "";
+						line = `${pad}${dot} ${bold(fg(C.text, label))}`;
+						if (rest) line += fg(C.faint, "(") + fg(C.ok, rest) + fg(C.faint, ")");
+					} else {
+						const detail = toolName === "bash" ? label : summarize(toolName, args ?? {});
+						line = `${pad}${dot} ${bold(fg(C.text, titleCase(toolName)))}`;
+						if (detail) line += fg(C.faint, "(") + fg(C.dim, detail) + fg(C.faint, ")");
+						if (typeof observed === "string" && observed && observed !== detail) line += fg(C.faint, " · ") + fg(C.ok, observed);
+					}
 					const ms = context.durationMs as number | undefined;
 					if (ms !== undefined && ms >= 500) line += fg(C.faint, `  ${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`);
 					return [truncateToWidth(line, width)];
@@ -149,19 +183,50 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 					if (!output) return EMPTY();
-					return new Lines((width) => output.split("\n").map((l) => truncateToWidth(`${pad}  ${fg(C.dim, l)}`, width)));
+					return new Lines((width) => output.split("\n").flatMap((line) => wrapTextWithAnsi(`${pad}  ${fg(C.dim, line)}`, width)));
 				}
 
 				if (context.isError && output) {
-					const first = oneLine(output);
-					return new Lines((width) => [truncateToWidth(`${pad}  ${fg(C.faint, "⎿")} ${fg(C.err, first)}`, width)]);
+					const summary = summarizeOperation(toolName, context.args ?? {}, output, true);
+					const detail = toolName === "bash" && operationLabel("bash", context.args ?? {}) === "Tests" ? summary : oneLine(output);
+					return new Lines((width) => [truncateToWidth(`${pad}  ${fg(C.faint, "⎿")} ${fg(C.err, detail)}`, width)]);
+				}
+				const summary = summarizeOperation(toolName, context.args ?? {}, output, context.isError === true);
+				const operation = toolName === "bash" ? operationLabel("bash", context.args ?? {}) : "";
+				if (!context.isError && summary && summary !== operation) {
+					if (context.state) {
+						context.state[OBSERVED_RESULT] = toolName === "bash" ? summary : summary.split(" · ").at(-1);
+					}
+					return EMPTY();
+				}
+				if (toolName === "bash" && output && summary !== operation) {
+					return new Lines((width) => [truncateToWidth(`${pad}  ${fg(C.faint, "⎿")} ${fg(C.ok, summary)}`, width)]);
 				}
 				return EMPTY();
 			},
 		};
 	});
 
-	pi.on("session_start", (_e, ctx) => applyThinkingLabel(ctx));
+	grouping = installToolGrouping();
+	pi.on("session_start", (_e, ctx) => {
+		applyThinkingLabel(ctx);
+		grouping?.reset();
+		grouping?.setEnabled(groupsEnabled);
+	});
+	pi.on("agent_start", () => grouping?.beginRun());
+	pi.on("tool_execution_start", (event) => grouping?.toolStart(event.toolCallId));
+	pi.on("agent_settled", () => grouping?.settle());
+	pi.on("session_shutdown", () => grouping?.setEnabled(false));
+
+	pi.registerCommand("toolgroups", {
+		description: "Group completed successful tool rows: on | off",
+		handler: async (args, ctx) => {
+			const value = args.trim().toLowerCase();
+			groupsEnabled = value === "on" ? true : value === "off" ? false : !groupsEnabled;
+			grouping?.setEnabled(groupsEnabled);
+			ctx.ui.notify(`tool groups ${groupsEnabled ? "on" : "off"}`, "info");
+		},
+	});
 
 	pi.registerCommand("bullets", {
 		description: "One-line tool bullets instead of boxed tool blocks: on | off",

@@ -92,7 +92,7 @@ test("a failing clipboard read is reported to the caller", async t => {
 function wiring(t: TestContext, contents: Parameters<typeof clipboard>[0]) {
   const handlers = new Map<string, any>();
   const d = dir(t);
-  createImagePaste({ clipboard: clipboard(contents), dir: d })({ on: (e: string, h: any) => handlers.set(e, h) } as any);
+  createImagePaste({ clipboard: clipboard(contents), dir: d })({ on: (e: string, h: any) => handlers.set(e, h), registerCommand() {}, registerShortcut() {} } as any);
   const pasted: string[] = [];
   const notes: string[] = [];
   let listener: ((data: string) => any) | undefined;
@@ -150,7 +150,7 @@ test("ordinary input, and pastes that have content, are never touched", async t 
 
 test("a clipboard error is shown to the user instead of failing silently", async t => {
   const handlers = new Map<string, any>();
-  createImagePaste({ clipboard: { getText: async () => { throw new Error("no access"); }, getImage: async () => null }, dir: dir(t) })({ on: (e: string, h: any) => handlers.set(e, h) } as any);
+  createImagePaste({ clipboard: { getText: async () => { throw new Error("no access"); }, getImage: async () => null }, dir: dir(t) })({ on: (e: string, h: any) => handlers.set(e, h), registerCommand() {}, registerShortcut() {} } as any);
   let listener: any; const notes: string[] = [];
   handlers.get("session_start")({}, { hasUI: true, ui: { onTerminalInput: (l: any) => { listener = l; return () => {}; }, pasteToEditor() {}, getEditorText: () => "", notify: (m: string) => notes.push(m) } });
   listener(EMPTY_PASTE);
@@ -167,6 +167,6 @@ test("reloading replaces the old listener instead of stacking a second one", asy
 
 test("without a UI there is nothing to listen to", t => {
   const handlers = new Map<string, any>();
-  createImagePaste({ clipboard: clipboard({ image: PNG }), dir: dir(t) })({ on: (e: string, h: any) => handlers.set(e, h) } as any);
+  createImagePaste({ clipboard: clipboard({ image: PNG }), dir: dir(t) })({ on: (e: string, h: any) => handlers.set(e, h), registerCommand() {}, registerShortcut() {} } as any);
   assert.doesNotThrow(() => handlers.get("session_start")({}, { hasUI: false, ui: {} }));
 });

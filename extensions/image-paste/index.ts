@@ -20,16 +20,66 @@
  * attached. Messages from rpc or other extensions are left alone.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { attachImagePaths } from "./attach.ts";
+import { findImagePathSpans, removeImagePathAt } from "./chips.ts";
 import { EMPTY_PASTE, type SaveDeps, saveClipboardImage } from "./clipboard.ts";
 
 // /reload re-runs this file in the same process: keep one listener, not one per reload.
 const LISTENER = Symbol.for("pi-config.image-paste.listener");
 const shared = globalThis as { [LISTENER]?: () => void };
 
+function inspectImagePath(path: string): string {
+	const resolved = path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+	const type = /\.png$/i.test(resolved) ? "image/png" : /\.jpe?g$/i.test(resolved) ? "image/jpeg" : /\.gif$/i.test(resolved) ? "image/gif" : "image/webp";
+	let details = "file not found";
+	try {
+		const info = statSync(resolved);
+		details = info.isFile() ? `${(info.size / 1024).toFixed(1)} KB · ${type}` : "not a regular file";
+	} catch {}
+	return `${basename(resolved)}\n${resolved}\n${details}`;
+}
+
 export function createImagePaste(deps: SaveDeps = {}) {
 	return function (pi: ExtensionAPI) {
+		const manageAttachments = async (args: string, ctx: ExtensionContext) => {
+				if (ctx.mode && ctx.mode !== "tui") return;
+				const editorDraft = ctx.ui.getEditorText();
+				const draft = editorDraft || args;
+				// Slash commands are submitted after Pi clears the editor. Explicit arguments are
+				// restored as an unsent draft; the shortcut operates on an existing draft directly.
+				if (!editorDraft && args) ctx.ui.setEditorText(draft);
+				const spans = findImagePathSpans(draft);
+				if (!spans.length) {
+					ctx.ui.notify("No image paths in the current draft.", "info");
+					return;
+				}
+				const actions = spans.flatMap((span) => [
+					{ label: `Inspect ${span.path}`, span, action: "inspect" as const },
+					{ label: `Remove ${span.path}`, span, action: "remove" as const },
+				]);
+				const selected = await ctx.ui.select("/attachments", actions.map((item) => item.label));
+				const choice = actions.find((item) => item.label === selected);
+				if (!choice) return;
+				if (choice.action === "inspect") {
+					ctx.ui.notify(inspectImagePath(choice.span.path), "info");
+					return;
+				}
+				ctx.ui.setEditorText(removeImagePathAt(draft, choice.span.start));
+				ctx.ui.notify("Image path removed from the draft. Editor undo restores it.", "info");
+		};
+		pi.registerCommand("attachments", {
+			description: "Inspect or remove draft image paths (Ctrl+Shift+I keeps the current draft)",
+			handler: manageAttachments,
+		});
+		pi.registerShortcut("ctrl+shift+i", {
+			description: "Inspect or remove image attachments in the current draft",
+			handler: ctx => manageAttachments("", ctx),
+		});
+
 		pi.on("input", async (event, ctx) => {
 			if (event.source !== "interactive") return { action: "continue" };
 			const existing = event.images ?? [];

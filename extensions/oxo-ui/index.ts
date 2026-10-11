@@ -11,9 +11,13 @@
  */
 
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { findImagePathSpans, projectedOffsetToSource, removeImagePathAt } from "../image-paste/chips.ts";
 
 // ---------- palette (oxocarbon-grey) ----------
 type RGB = [number, number, number];
@@ -68,11 +72,170 @@ function colorBorder(line: string, color: RGB): string {
 	return out + RESET;
 }
 
-class OxoEditor extends CustomEditor {
+interface VisualLine { logicalLine: number; startCol: number; length: number; }
+interface EditorInternals {
+	state: { lines: string[]; cursorLine: number; cursorCol: number };
+	lastAction: unknown;
+	paddingX: number;
+	lastWidth: number;
+	scrollOffset: number;
+	renderedVisibleLineCount: number;
+	setCursorCol(column: number): void;
+	pushUndoSnapshot(): void;
+	exitHistoryBrowsing(): void;
+	buildVisualLineMap(width: number): VisualLine[];
+	segment(text: string, granularity: "grapheme"): Iterable<Intl.SegmentData>;
+}
+
+export class OxoEditor extends CustomEditor {
+	private internals(): EditorInternals { return this as unknown as EditorInternals; }
+	onImageInspect?: (path: string) => void;
+
+	handleInput(data: string): void {
+		const runtime = this.internals();
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const source = lines.join("\n");
+		const offset = lines.slice(0, cursor.line).reduce((n: number, line: string) => n + line.length + 1, 0) + cursor.col;
+		const spans = findImagePathSpans(source);
+		const span = spans.find((item) => offset > item.start && offset < item.end);
+		const kb = getKeybindings();
+		const right = kb.matches(data, "tui.editor.cursorRight") || kb.matches(data, "tui.editor.cursorWordRight") || data === "\x1b[C" || data === "\x1b[1;5C";
+		const left = kb.matches(data, "tui.editor.cursorLeft") || kb.matches(data, "tui.editor.cursorWordLeft") || data === "\x1b[D" || data === "\x1b[1;5D";
+		const backwardDelete = data === "\x7f" || data === "\b" || kb.matches(data, "tui.editor.deleteCharBackward");
+		const forwardDelete = kb.matches(data, "tui.editor.deleteCharForward");
+		if (span && (right || left)) {
+			const target = right ? span.end : span.start;
+			runtime.state.cursorLine = source.slice(0, target).split("\n").length - 1;
+			runtime.setCursorCol(target - (source.lastIndexOf("\n", target - 1) + 1));
+			runtime.lastAction = null;
+			return;
+		}
+		if (span && (backwardDelete || forwardDelete)) {
+			runtime.pushUndoSnapshot();
+			const updated = removeImagePathAt(source, span.start);
+			runtime.state.lines = updated.split("\n");
+			runtime.state.cursorLine = updated.slice(0, span.start).split("\n").length - 1;
+			runtime.setCursorCol(span.start - (updated.lastIndexOf("\n", span.start - 1) + 1));
+			this.onChange?.(this.getText());
+			this.tui.requestRender();
+			return;
+		}
+		if (span) {
+			runtime.state.cursorLine = source.slice(0, span.start).split("\n").length - 1;
+			runtime.setCursorCol(span.start - (source.lastIndexOf("\n", span.start - 1) + 1));
+		}
+		const vertical = kb.matches(data, "tui.editor.cursorUp") || kb.matches(data, "tui.editor.cursorDown");
+		if (vertical && spans.length) {
+			let projected = "";
+			let consumed = 0;
+			for (const item of spans) { projected += source.slice(consumed, item.start) + item.chip; consumed = item.end; }
+			projected += source.slice(consumed);
+			const projectedOffset = this.sourceOffsetToProjected(offset, spans);
+			const projectedLines = projected.split("\n");
+			runtime.state.lines = projectedLines;
+			runtime.state.cursorLine = projected.slice(0, projectedOffset).split("\n").length - 1;
+			runtime.setCursorCol(projectedOffset - (projected.lastIndexOf("\n", projectedOffset - 1) + 1));
+			try {
+				super.handleInput(data);
+				if (runtime.state.lines.join("\n") === projected) {
+					const moved = runtime.state.lines.slice(0, runtime.state.cursorLine).reduce((n: number, line: string) => n + line.length + 1, 0) + runtime.state.cursorCol;
+					const target = projectedOffsetToSource(moved, spans);
+					runtime.state.lines = lines;
+					runtime.state.cursorLine = source.slice(0, target).split("\n").length - 1;
+					runtime.setCursorCol(target - (source.lastIndexOf("\n", target - 1) + 1));
+				} else {
+					const changed = runtime.state.lines.join("\n");
+					const moved = runtime.state.lines.slice(0, runtime.state.cursorLine).reduce((n: number, line: string) => n + line.length + 1, 0) + runtime.state.cursorCol;
+					const restored = this.restoreImageProjection(changed, moved, source, spans);
+					if (restored.text !== changed) {
+						runtime.state.lines = restored.text.split("\n");
+						runtime.state.cursorLine = restored.text.slice(0, restored.cursorOffset).split("\n").length - 1;
+						runtime.setCursorCol(restored.cursorOffset - (restored.text.lastIndexOf("\n", restored.cursorOffset - 1) + 1));
+					}
+				}
+			} finally {
+				if (runtime.state.lines === projectedLines) runtime.state.lines = lines;
+			}
+			return;
+		}
+		const remove = spans.find((item) => (offset === item.end && backwardDelete) ||
+			(offset === item.start && forwardDelete));
+		if (remove) {
+			runtime.pushUndoSnapshot();
+			const updated = removeImagePathAt(source, remove.start);
+			runtime.state.lines = updated.split("\n");
+			runtime.state.cursorLine = updated.slice(0, remove.start).split("\n").length - 1;
+			runtime.setCursorCol(remove.start - (updated.lastIndexOf("\n", remove.start - 1) + 1));
+			this.onChange?.(this.getText());
+			this.tui.requestRender();
+			return;
+		}
+		const current = spans.find((item) => (right && offset === item.start) || (left && offset === item.end));
+		if (current) {
+			const target = right ? current.end : current.start;
+			runtime.state.cursorLine = source.slice(0, target).split("\n").length - 1;
+			runtime.setCursorCol(target - (source.lastIndexOf("\n", target - 1) + 1));
+			runtime.lastAction = null;
+			return;
+		}
+		super.handleInput(data);
+	}
+
+	private sourceOffsetToProjected(offset: number, spans: ReturnType<typeof findImagePathSpans>): number {
+		let delta = 0;
+		for (const span of spans) {
+			if (offset < span.start) return offset - delta;
+			if (offset <= span.end) return span.start - delta + (offset === span.end ? span.chip.length : 0);
+			delta += span.end - span.start - span.chip.length;
+		}
+		return offset - delta;
+	}
+
+	private restoreImageProjection(text: string, cursorOffset: number, sourceText: string, spans: ReturnType<typeof findImagePathSpans>): { text: string; cursorOffset: number } {
+		let restored = text;
+		let mappedCursor = cursorOffset;
+		for (const span of spans) {
+			const at = restored.indexOf(span.chip);
+			if (at < 0) continue;
+			const sourceValue = sourceText.slice(span.start, span.end);
+			restored = restored.slice(0, at) + sourceValue + restored.slice(at + span.chip.length);
+			if (at < mappedCursor) mappedCursor += sourceValue.length - span.chip.length;
+			else if (at <= mappedCursor && mappedCursor < at + span.chip.length) mappedCursor = at + (mappedCursor - at < span.chip.length / 2 ? 0 : sourceValue.length);
+		}
+		return { text: restored, cursorOffset: mappedCursor };
+	}
+
 	render(width: number): string[] {
 		if (width < 8) return super.render(width);
+		const runtime = this.internals();
 		const inner = width - 2;
-		const lines = super.render(inner);
+		const sourceLines = this.getLines();
+		const sourceCursor = this.getCursor();
+		const sourceCursorLine = sourceCursor.line;
+		const sourceCursorCol = sourceCursor.col;
+		const sourceOffset = sourceLines.slice(0, sourceCursor.line).reduce((n: number, line: string) => n + line.length + 1, 0) + sourceCursor.col;
+		const sourceText = sourceLines.join("\n");
+		const spans = findImagePathSpans(sourceText);
+		if (spans.length) {
+			let projected = "";
+			let position = 0;
+			for (const span of spans) {
+				projected += sourceText.slice(position, span.start) + span.chip;
+				position = span.end;
+			}
+			projected += sourceText.slice(position);
+			runtime.state.lines = projected.split("\n");
+			const projectedOffset = this.sourceOffsetToProjected(sourceOffset, spans);
+			const before = runtime.state.lines.join("\n");
+			const lineStart = before.lastIndexOf("\n", Math.max(0, projectedOffset - 1)) + 1;
+			runtime.state.cursorLine = (before.slice(0, projectedOffset).match(/\n/g) ?? []).length;
+			runtime.state.cursorCol = projectedOffset - lineStart;
+		}
+		let lines: string[];
+		try { lines = super.render(inner); }
+		finally { runtime.state.lines = sourceLines; runtime.state.cursorCol = sourceCursorCol; runtime.state.cursorLine = sourceCursorLine; }
+
 		if (lines.length < 2) return lines;
 
 		const color = this.getText().startsWith("!") ? BASH_BORDER : BORDER;
@@ -98,6 +261,87 @@ class OxoEditor extends CustomEditor {
 			firstContent = false;
 			return `${gutter}${line}`;
 		});
+	}
+
+	handleMouse(event: Parameters<CustomEditor["handleMouse"]>[0]): ReturnType<CustomEditor["handleMouse"]> {
+		const runtime = this.internals();
+		if (event?.type !== "click" || event.button !== "left" || !this.getLines()) return super.handleMouse(event);
+		const innerEvent = { ...event, x: event.x - (event.y <= runtime.renderedVisibleLineCount ? 2 : 1), width: Math.max(1, event.width - 2) };
+		const sourceLines = this.getLines();
+		const sourceText = sourceLines.join("\n");
+		const spans = findImagePathSpans(sourceText);
+		if (!spans.length || event.y <= 0 || event.y > runtime.renderedVisibleLineCount) return super.handleMouse(innerEvent);
+		let projected = "";
+		let position = 0;
+		for (const span of spans) {
+			projected += sourceText.slice(position, span.start) + span.chip;
+			position = span.end;
+		}
+		projected += sourceText.slice(position);
+		const projectedLines = projected.split("\n");
+		runtime.state.lines = projectedLines;
+		try {
+			const visualLine = runtime.buildVisualLineMap(runtime.lastWidth)[runtime.scrollOffset + event.y - 1];
+			if (!visualLine) return { handled: true, focus: true };
+			const line = runtime.state.lines[visualLine.logicalLine] ?? "";
+			let column = 0;
+			let charOffset = -1;
+			const maxPadding = Math.max(0, Math.floor((event.width - 3) / 2));
+			const targetColumn = event.x - 2 - Math.min(runtime.paddingX, maxPadding);
+			if (targetColumn >= 0) for (const grapheme of runtime.segment(line.slice(visualLine.startCol, visualLine.startCol + visualLine.length), "grapheme")) {
+				const next = column + visibleWidth(grapheme.segment);
+				if (targetColumn < next) { charOffset = visualLine.startCol + grapheme.index; break; }
+				column = next;
+			}
+			if (charOffset < 0) return { handled: true, focus: true };
+			const projectedOffset = runtime.state.lines.slice(0, visualLine.logicalLine).reduce((n: number, value: string) => n + value.length + 1, 0) + charOffset;
+			const chip = spans.map((span) => {
+				const delta = spans.filter((prior) => prior.start < span.start).reduce((n: number, prior) => n + prior.end - prior.start - prior.chip.length, 0);
+				const start = span.start - delta;
+				return { span, start, end: start + span.chip.length };
+			}).find(({ start, end }) => projectedOffset >= start && projectedOffset < end);
+			if (chip) {
+				runtime.state.lines = sourceLines;
+				const chipOffset = projectedOffset - chip.start;
+				if (chipOffset >= chip.span.chip.length - 2) {
+					const updated = removeImagePathAt(sourceText, chip.span.start);
+					runtime.pushUndoSnapshot();
+					runtime.state.lines = updated.split("\n");
+					runtime.state.cursorLine = updated.slice(0, chip.span.start).split("\n").length - 1;
+					runtime.setCursorCol(chip.span.start - (updated.lastIndexOf("\n", chip.span.start - 1) + 1));
+					this.onChange?.(this.getText());
+					this.tui.requestRender();
+					return { handled: true, focus: true };
+				}
+				this.onImageInspect?.(chip.span.path);
+				return { handled: true, focus: true };
+			}
+
+			const result = super.handleMouse(innerEvent);
+			if (runtime.state.lines.join("\n") !== projected) {
+				const changed = runtime.state.lines.join("\n");
+				const cursor = this.getCursor();
+				const moved = runtime.state.lines.slice(0, cursor.line).reduce((n: number, value: string) => n + value.length + 1, 0) + cursor.col;
+				const restored = this.restoreImageProjection(changed, moved, sourceText, spans);
+				if (restored.text !== changed) {
+					runtime.state.lines = restored.text.split("\n");
+					runtime.state.cursorLine = restored.text.slice(0, restored.cursorOffset).split("\n").length - 1;
+					runtime.setCursorCol(restored.cursorOffset - (restored.text.lastIndexOf("\n", restored.cursorOffset - 1) + 1));
+				}
+				return result;
+			}
+			const cursor = this.getCursor();
+			const mappedOffset = runtime.state.lines.slice(0, cursor.line).reduce((n: number, value: string) => n + value.length + 1, 0) + cursor.col;
+			const sourceOffset = projectedOffsetToSource(mappedOffset, spans);
+			runtime.state.lines = sourceLines;
+			runtime.state.cursorLine = sourceText.slice(0, sourceOffset).split("\n").length - 1;
+			runtime.setCursorCol(sourceOffset - (sourceText.lastIndexOf("\n", sourceOffset - 1) + 1));
+			runtime.lastAction = null;
+			runtime.exitHistoryBrowsing();
+			return result;
+		} finally {
+			if (runtime.state.lines === projectedLines) runtime.state.lines = sourceLines;
+		}
 	}
 }
 
@@ -245,7 +489,21 @@ export default function (pi: ExtensionAPI) {
 
 	const install = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
-		ctx.ui.setEditorComponent((tui, theme, kb) => new OxoEditor(tui, theme, kb));
+		ctx.ui.setEditorComponent((tui, theme, kb) => {
+			const editor = new OxoEditor(tui, theme, kb);
+			editor.onImageInspect = (path) => {
+				const resolved = path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+				const type = /\.png$/i.test(resolved) ? "image/png" : /\.jpe?g$/i.test(resolved) ? "image/jpeg" : /\.gif$/i.test(resolved) ? "image/gif" : "image/webp";
+				let details = "file not found";
+				try {
+					const info = statSync(resolved);
+					if (info.isFile()) details = `${(info.size / 1024).toFixed(1)} KB · ${type}`;
+					else details = "not a regular file";
+				} catch {}
+				ctx.ui.notify(`${basename(resolved)}\n${resolved}\n${details}`, "info");
+			};
+			return editor;
+		});
 		ctx.ui.setFooter((tui, _theme, footerData) => {
 			requestRender = () => tui.requestRender();
 			const unsub = footerData.onBranchChange(() => {

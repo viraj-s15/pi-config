@@ -144,7 +144,7 @@ test("at most eight images per message; the rest stay as text", async t => {
 
 function hook() {
   let handler: any;
-  imagePaste({ on: (event: string, h: any) => { if (event === "input") handler = h; } } as any);
+  imagePaste({ on: (event: string, h: any) => { if (event === "input") handler = h; }, registerCommand() {}, registerShortcut() {} } as any);
   const notes: string[] = [];
   const ctx = { hasUI: true, ui: { notify: (m: string) => notes.push(m) } };
   return { call: (e: any) => handler(e, ctx), notes };
