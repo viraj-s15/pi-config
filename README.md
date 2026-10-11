@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar on your messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -65,7 +65,16 @@ Pi folds a large paste into a marker such as `[paste #1 2314 chars]` and still s
 - Clicks only reach Pi in fullscreen mode, which is Pi's default (`tuiMode`). In regular mode the terminal keeps the mouse, so markers stay folded, but they are still sent in full.
 - Only a left click on the marker counts. Moving the cursor onto it with the keyboard, or clicking the text around it, does nothing.
 - It wraps two methods of Pi's editor and relies on its marker numbering, so a Pi update that changes those internals makes it fall back to Pi's own behavior. The tests run against Pi's real editor and will show it.
-- This is the editor only. Once you send the message, the transcript shows the full text as before.
+- This marker behavior is editor-only. Sent messages have their own compact preview, described below.
+
+### Long messages in the chat
+
+`user-bar` shows sent user messages over **500 characters** as two rendered preview lines plus a **▸ Show more · N characters** row. Left-click **Show more** to expand the full message, then **▾ Show less** to collapse it again. It applies to typed and pasted text, including messages already in a resumed chat; messages that fit in two lines stay inline.
+
+- The blue bar stays on both preview and expanded messages. `/userbar off` disables the accent without disabling folding.
+- Only the display changes. The saved message, Markdown content, attachments, and text sent to the model remain intact. Assistant replies are untouched.
+- Mouse toggles need fullscreen mode. `/userfold off` shows all user messages in full without a mouse; `/userfold on` restores folding.
+- Expansion is per rendered message, not saved to disk. A transcript rebuild (such as `/reload` or switching sessions) starts the new message components collapsed again.
 
 ## Image paste
 
