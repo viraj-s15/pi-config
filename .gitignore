@@ -2,3 +2,4 @@
 /sessions/
 /extensions/*/node_modules/
 .pi/todos/
+/extensions/herdr-agent-state.ts
