@@ -1,7 +1,7 @@
 import { Container, MouseRegion, Spacer, truncateToWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { commandProgram } from "./summaries.ts";
-import { foldThinking, replyTimes, thinkingOf, thinkingRealMessage, unfoldAllThinking } from "./thinking-label.ts";
+import { foldThinking, thinkingOf, thinkingRealMessage, unfoldAllThinking } from "./thinking-label.ts";
 
 // v2 holds the state of this version. The unversioned key belonged to earlier versions of this file:
 // the first only tracked parents and never patched render, the second patched render with a closure
@@ -52,18 +52,12 @@ const titleOf = (tool: string) => TITLES[tool] ?? tool.replace(/[_-]+/g, " ").re
 const fg = (rgb: [number, number, number], text: string) => `\x1b[38;2;${rgb.join(";")}m${text}\x1b[39m`;
 const OK: [number, number, number] = [0x42, 0xbe, 0x65];
 const ERR: [number, number, number] = [0xfa, 0x4d, 0x56];
-const TEXT: [number, number, number] = [0xdd, 0xe1, 0xe6];
 const DIM: [number, number, number] = [0x8d, 0x91, 0x99];
 
 const RAIL = "\x1b[38;2;72;74;80m│\x1b[39m ";
 const FAINT = "\x1b[2m";
 /** Dim a rendered line, re-applying faint after any reset inside it. */
 const faint = (line: string) => `${FAINT}${line.replace(/\x1b\[(?:0|22)?m/g, (reset) => reset + FAINT)}\x1b[22m`;
-
-function formatDuration(ms: number): string {
-	const seconds = Math.max(1, Math.round(ms / 1000));
-	return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
-}
 
 /** One truncated line; MouseRegion supplies the click handling. */
 class HeaderLine implements Component {
@@ -123,8 +117,6 @@ export class ToolGroupComponent extends Container {
 		items: Component[],
 		private readonly state: GroupingState,
 		private readonly answer?: Component,
-		/** The reply right after the run, thinking or not: the run's time runs until it is done. */
-		private readonly reply?: Component,
 	) {
 		super();
 		this.items = items;
@@ -137,10 +129,8 @@ export class ToolGroupComponent extends Container {
 				const thought = describeThinking(replies);
 				const arrow = ` ${fg(OK, this.expanded ? "▾" : "▸")}`;
 				// Only thinking (before an answer): keep it short.
-				if (!count && !this.items.some(isNote)) return `${arrow}${fg(DIM, ` ${thought || "thought"}`)}`;
+				if (!count) return `${arrow}${fg(DIM, ` ${thought || "thought"}`)}`;
 				const parts: string[] = [];
-				const worked = this.duration(this.reply && !replies.includes(this.reply) ? [...replies, this.reply] : replies);
-				if (worked) parts.push(fg(TEXT, worked));
 				if (count) parts.push(fg(DIM, `${count} tool call${count === 1 ? "" : "s"}`) + (failed ? ` ${fg(ERR, `(${failed} failed)`)}` : ""));
 				const what = describeTools(this.tools);
 				const rest = [thought, what].filter(Boolean).join(" · ");
@@ -156,18 +146,6 @@ export class ToolGroupComponent extends Container {
 				return { handled: true, render: true };
 			},
 		);
-	}
-
-	/** "Worked for 1m 12s", or "Working for …" while the run is going; empty when no time is known. */
-	private duration(replies: Component[]): string {
-		const times = replies.map((reply) => replyTimes(reply));
-		const starts = times.flatMap((t) => (t.start === undefined ? [] : [t.start]));
-		if (!starts.length) return "";
-		const start = Math.min(...starts);
-		const live = starts.some((t) => this.state.activeMessages?.has(t)) || this.tools.some((tool) => runtimeOf(tool).isPartial || !runtimeOf(tool).result);
-		if (live) return `Working for ${formatDuration(Date.now() - start)}`;
-		const ends = times.flatMap((t) => (t.end === undefined ? [] : [t.end]));
-		return ends.length ? `Worked for ${formatDuration(Math.max(...ends) - start)}` : "";
 	}
 
 	private get key(): object {
@@ -234,19 +212,13 @@ const assistantMessage = (component: Component) =>
 const hasText = (message: AssistantRuntimeAdapter["lastMessage"]) =>
 	!!message?.content?.some((block) => block.type === "text" && String(block.text ?? "").trim());
 
-/** A reply with text that also called tools: a note along the way ("Now the README:"), not an answer. */
-function isNote(component: Component): boolean {
-	const message = assistantMessage(component);
-	return hasText(message) && !!message?.content?.some((block) => block.type === "toolCall");
-}
-
-/** Work: tool rows, thinking, notes, and spacing between them. Answers and errors are not. */
+/** Fold only tools, text-free assistant rows, and their spacing. Regular text always breaks a group. */
 function isWork(component: Component): boolean {
 	if (component instanceof ToolExecutionComponent || component instanceof Spacer) return true;
 	const message = assistantMessage(component);
 	if (!message || !Array.isArray(message.content)) return false;
 	if (message.stopReason === "error" || message.stopReason === "aborted") return false; // keep the error in view
-	return !hasText(message) || isNote(component);
+	return !hasText(message);
 }
 
 /** An answer whose first content is thinking: that thinking row can fold into the line above it. */
@@ -262,8 +234,8 @@ function projectGroups(children: Component[], state: GroupingState): Component[]
 	const projected: Component[] = [];
 	const answers = new Set<Component>(); // answers whose thinking is folded into a line this render
 	for (const child of children) if (child instanceof ToolExecutionComponent) captureRender(child, state);
-	const fold = (items: Component[], answer?: Component, reply?: Component) => {
-		const group = new ToolGroupComponent(items, state, answer, reply);
+	const fold = (items: Component[], answer?: Component) => {
+		const group = new ToolGroupComponent(items, state, answer);
 		if (answer) answers.add(answer);
 		projected.push(group);
 	};
@@ -284,9 +256,7 @@ function projectGroups(children: Component[], state: GroupingState): Component[]
 		while (last > first && children[last - 1] instanceof Spacer) last--;
 		const items = children.slice(first, last);
 		const answer = thinkingAnswer(children[end]);
-		const next = children[end];
-		const reply = next && assistantMessage(next) && !isWork(next) ? next : undefined;
-		if (items.length > 0 || answer) fold(items, answer, reply);
+		if (items.length > 0 || answer) fold(items, answer);
 		projected.push(...children.slice(last, end));
 		if (answer) projected.push(children[end]!);
 		i = answer ? end + 1 : end;

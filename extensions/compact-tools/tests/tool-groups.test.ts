@@ -34,9 +34,9 @@ const withText = (text: string, thought = false, timestamp = clock++) => new Ass
 	{ role: "assistant", content: [...(thought ? [{ type: "thinking", thinking: "deciding" }] : []), { type: "text", text }], usage: usage(200, thought ? 100 : undefined), stopReason: "stop", timestamp } as any,
 	true, undefined, "● thinking…", 0,
 );
-/** Text the agent wrote alongside tool calls ("Now the README:"): a note, not an answer. */
-const note = (text: string, timestamp = clock++) => new AssistantMessageComponent(
-	{ role: "assistant", content: [{ type: "text", text }, { type: "toolCall", id: "n", name: "bash", arguments: {} }], usage: usage(50), stopReason: "toolUse", timestamp } as any,
+/** Regular assistant text in a reply that also calls a tool. It must stay visible. */
+const note = (text: string, timestamp = clock++, thought = false) => new AssistantMessageComponent(
+	{ role: "assistant", content: [...(thought ? [{ type: "thinking", thinking: "deciding" }] : []), { type: "text", text }, { type: "toolCall", id: "n", name: "bash", arguments: {} }], usage: usage(200, thought ? 100 : undefined), stopReason: "toolUse", timestamp } as any,
 	true, undefined, "● thinking…", 0,
 );
 const FAINT = "\x1b[2m";
@@ -89,7 +89,7 @@ test("the answer's own thinking hides in the line, and closes the timeline when 
 		const a = tool("a");
 		const chat = chatOf(thinkingOnly(), a, answer);
 		const collapsed = screen(chat);
-		assert.match(collapsed, /▸ Worked for \d+s · 1 tool call · thought/);
+		assert.match(collapsed, /▸ 1 tool call · thought/);
 		assert.match(collapsed, /Here is the answer\./);
 		assert.doesNotMatch(collapsed, /● thought/, "the answer's thinking row is folded away");
 		const tui = new TuiAltScreen(mouseTerminal());
@@ -101,7 +101,7 @@ test("the answer's own thinking hides in the line, and closes the timeline when 
 			for (const suffix of ["M", "m"]) (tui as any).handleViewportInput(`\x1b[<0;5;${y + 1}${suffix}`);
 			tui.renderNow();
 			const open = strip(tui.getScreenLines().join("\n"));
-			assert.match(open, /▾ Worked for \d+s · 1 tool call[\s\S]*│ ● thought[\s\S]*│ ● echo a[\s\S]*│\s+● thought 3s\s*\n[\s\S]*Here is the answer\./, "opened: everything, in order");
+			assert.match(open, /▾ 1 tool call[\s\S]*│ ● thought[\s\S]*│ ● echo a[\s\S]*│\s+● thought 3s\s*\n[\s\S]*Here is the answer\./, "opened: everything, in order");
 		} finally { tui.stop({ preserveScreen: true }); }
 	} finally { s.done(); }
 });
@@ -218,10 +218,10 @@ test("the run in progress folds too, and the line keeps counting as work arrives
 		s.grouping.toolStart("running");
 		const chat = chatOf(tool("old"), withText("earlier answer"), thinking, tool("a"), running);
 		const live = screen(chat);
-		assert.match(live, /▸ (Worked for \d+s · )?1 tool call · echo[\s\S]*earlier answer[\s\S]*▸ Working for \d+s · 2 tool calls · thought · echo ×2/);
+		assert.match(live, /▸ 1 tool call · echo[\s\S]*earlier answer[\s\S]*▸ 2 tool calls · thought · echo ×2/);
 		assert.doesNotMatch(live, /● (echo|thought)/, "no separate rows while it works");
 		chat.addChild(tool("b"));
-		assert.match(screen(chat), /▸ Working for \d+s · 3 tool calls/);
+		assert.match(screen(chat), /▸ 3 tool calls/);
 	} finally { s.done(); }
 });
 
@@ -236,31 +236,43 @@ test("Ctrl+O does not open folded lines; it only shows output inside one you ope
 	} finally { s.done(); }
 });
 
-test("a run's thinking, tool calls and notes fold into one 'Worked for' line; only the answer stays", () => {
+test("regular text splits tool groups, even when the same reply calls a tool", () => {
 	const s = setup();
 	try {
-		const base = 1_900_000_000_000;
-		const t1 = thinkingOnly(base), t2 = thinkingOnly(base + 6_000);
-		s.labels.recordEnd((t1 as any).lastMessage, base + 5_000);
-		s.labels.recordEnd((t2 as any).lastMessage, base + 13_000);
-		const n = note("Found the cause, fixing it.", base + 14_000);
-		s.labels.recordEnd((n as any).lastMessage, base + 15_000);
-		const answer = withText("All done.", false, base + 20_000);
-		s.labels.recordEnd((answer as any).lastMessage, base + 72_000);
-		const chat = chatOf(t1, tool("a"), t2, tool("b"), n, tool("c"), answer);
+		const first = note("Found the cause, fixing it.");
+		const second = note("Checking the tests next.");
+		const chat = chatOf(thinkingOnly(), tool("a"), tool("b"), first, tool("c"), second, tool("d"), withText("All done."));
+		const before = [...chat.children];
 		const text = screen(chat);
-		assert.equal(headerOf(chat), "▸ Worked for 1m 12s · 3 tool calls · thought 12s · echo ×3");
-		assert.doesNotMatch(text, /Found the cause/, "notes fold away with the work");
-		assert.match(text, /All done\./);
-		assert.equal(chat.render(100).filter((line) => /[▸▾]/.test(strip(line))).length, 1, "one line for the whole run");
+		assert.match(text, /▸ 2 tool calls[^\n]*\n[\s\S]*Found the cause, fixing it\.[\s\S]*▸ 1 tool call[^\n]*\n[\s\S]*Checking the tests next\.[\s\S]*▸ 1 tool call[^\n]*\n[\s\S]*All done\./);
+		assert.equal(chat.render(100).filter((line) => /[▸▾]/.test(strip(line))).length, 3);
+		assert.doesNotMatch(text, /● echo|● thought/);
+		assert.deepEqual(chat.children, before);
+		for (const line of chat.render(100).filter((line) => /Found the cause|Checking the tests/.test(strip(line)))) {
+			assert.ok(!line.includes(FAINT), "regular text is not dimmed");
+			assert.doesNotMatch(strip(line), /^│/, "regular text is outside the timeline");
+		}
 	} finally { s.done(); }
 });
 
-test("opened, the run is a quiet timeline: every row faint, behind a rail", () => {
+test("a full explanation before a file update stays visible, with thinking and the update folded separately", () => {
+	const s = setup();
+	try {
+		const lesson = note("## What went wrong\n\nWorkers record arrival. The waiter releases the lock.\n\n```text\nvoid await() {\n    while (count != N) allArrived.wait();\n}\n```\n\nYour turn: write the Sem monitor.", 1_900_000_000_000, true);
+		s.labels.recordEnd((lesson as any).lastMessage, 1_900_000_000_000 + 14_000);
+		const chat = chatOf(lesson, tool("update"), withText("Added the example to your notes."));
+		const text = screen(chat);
+		assert.match(text, /▸ thought 7s[\s\S]*What went wrong[\s\S]*Workers record arrival[\s\S]*while \(count != N\)[\s\S]*Your turn: write the Sem monitor\.[\s\S]*▸ 1 tool call[\s\S]*Added the example/);
+		assert.doesNotMatch(text, /● thought|● echo update/);
+		assert.equal(chat.render(100).filter((line) => /[▸▾]/.test(strip(line))).length, 2);
+	} finally { s.done(); }
+});
+
+test("opening a group dims only its work rows and leaves text and later groups alone", () => {
 	const s = setup();
 	const tui = new TuiAltScreen(mouseTerminal());
 	try {
-		const chat = chatOf(thinkingOnly(), tool("a"), note("Checking the config."), tool("b"), withText("Answer."));
+		const chat = chatOf(thinkingOnly(), tool("a"), tool("b"), note("Checking the config."), tool("c"), withText("Answer."));
 		tui.addChild(chat);
 		(tui as any).beforeTerminalStart();
 		tui.renderNow();
@@ -269,9 +281,14 @@ test("opened, the run is a quiet timeline: every row faint, behind a rail", () =
 		tui.renderNow();
 		const lines = chat.render(100);
 		const header = lines.findIndex((line) => strip(line).includes("▾"));
+		const noteAt = lines.findIndex((line) => strip(line).includes("Checking the config."));
 		const answerAt = lines.findIndex((line) => strip(line).includes("Answer."));
-		const inside = lines.slice(header + 1, answerAt).filter((line) => strip(line).trim() && !strip(line).includes("Answer"));
-		assert.ok(inside.some((line) => strip(line).includes("Checking the config.")), "notes are back");
+		assert.ok(noteAt > header && answerAt > noteAt);
+		const inside = lines.slice(header + 1, noteAt).filter((line) => strip(line).trim());
+		assert.ok(inside.some((line) => strip(line).includes("echo a")));
+		assert.match(strip(lines.slice(noteAt).join("\n")), /Checking the config\.[\s\S]*▸ 1 tool call[\s\S]*Answer\./);
+		assert.doesNotMatch(strip(lines.slice(noteAt).join("\n")), /echo c/);
+		assert.ok(!lines[noteAt]!.includes(FAINT), "the note is not dimmed");
 		for (const line of inside.filter((l) => strip(l).trim() !== "│")) {
 			assert.match(strip(line), /^│ /, `rail: ${strip(line)}`);
 			assert.ok(line.includes(FAINT), `faint: ${strip(line)}`);
@@ -284,16 +301,23 @@ test("opened, the run is a quiet timeline: every row faint, behind a rail", () =
 	}
 });
 
-test("while the run is going the line counts up: 'Working for'", () => {
+test("streaming text stays visible when a tool call is added, after settling and after reload", () => {
 	const s = setup();
 	try {
-		const started = Date.now() - 65_000;
-		const t = thinkingOnly(started);
+		const reply = withText("This explanation must stay.", true);
+		const message = (reply as any).lastMessage;
 		s.grouping.beginRun();
-		s.grouping.messageStart(started);
-		const chat = chatOf(t, tool("a"));
-		assert.match(headerOf(chat), /^▸ Working for 1m 0[5-6]s · 1 tool call/);
+		s.grouping.messageStart(message.timestamp);
+		const chat = chatOf(reply);
+		assert.match(screen(chat), /▸ thought[\s\S]*This explanation must stay\./);
+		reply.updateContent({ ...message, stopReason: "toolUse", content: [...message.content, { type: "toolCall", id: "edit", name: "bash", arguments: {} }] } as any, true);
+		chat.addChild(tool("edit"));
+		const expected = /▸ thought[\s\S]*This explanation must stay\.[\s\S]*▸ 1 tool call/;
+		assert.match(screen(chat), expected);
 		s.grouping.settle();
+		assert.match(screen(chat), expected);
+		installToolGrouping().setEnabled(true);
+		assert.match(screen(chat), expected);
 	} finally { s.done(); }
 });
 

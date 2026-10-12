@@ -168,11 +168,3 @@ export function thinkingOf(component: object): { has: boolean; ms?: number } {
 export function thinkingRealMessage(component: object): Message | undefined {
 	return stateOf()?.messageOf?.get(component);
 }
-
-/** When a row's reply started, and when it finished if that is known. */
-export function replyTimes(component: object): { start?: number; end?: number } {
-	const state = stateOf();
-	const message = state?.messageOf?.get(component) ?? (component as { lastMessage?: Message }).lastMessage;
-	const start = typeof message?.timestamp === "number" ? message.timestamp : undefined;
-	return { start, end: start === undefined ? undefined : state?.ends.get(start) };
-}

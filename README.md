@@ -76,13 +76,19 @@ For the default OpenAI model, run `/login` and choose OpenAI. Credentials stay o
 
 ### Tool activity
 
-A run's thinking, tool calls, and intermediate notes fold into one clickable line above the answer:
+Thinking and tool calls fold into clickable lines. Regular assistant text always stays visible and starts a new group for any work that follows, even when the same reply also calls a tool:
 
 ```text
-▸ Worked for 4m 10s · 14 tool calls · thought 42s · Tests 232 passed · rg ×2
+▸ 2 tool calls · thought 7s · Read ×2
+
+The explanation stays visible here.
+
+▸ 1 tool call · Update
+
+The next piece of text stays visible here.
 ```
 
-Click to open a faint timeline. The answer stays visible at full brightness. While work is in progress, the line reads `Working for …`; the spinner above the input shows the current action. `Ctrl+O` expands tool output inside an open timeline but doesn't open a folded run. `/toolgroups off` shows every row.
+Click a line to open its thinking and tools as a faint timeline. Groups also fold while the agent works; the spinner above the input shows the current action. `Ctrl+O` expands tool output inside an open timeline but doesn't open a folded group. `/toolgroups off` shows every row.
 
 Tool rows show test counts, Git results, and other results they recognize. Other shell commands keep their command preview. Thinking time is estimated from the reply's duration and how many tokens went into thinking. If that count is unknown, the row just says `thought`.
 
@@ -252,7 +258,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.veer.pi-search-start
 | `/oxo` | Toggle the input box and footer |
 | `/verbs on\|off` | Toggle the working line |
 | `/bullets on\|off` | Toggle compact tool rows |
-| `/toolgroups on\|off` | Toggle folded runs |
+| `/toolgroups on\|off` | Toggle folded thinking and tool groups |
 | `/userbar on\|off` | Toggle the blue message bar |
 | `/userfold on\|off` | Toggle long-message folding |
 | `/latex on\|off` | Toggle LaTeX images |
