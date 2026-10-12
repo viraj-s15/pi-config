@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { AskUserParams, type AskUserDetails, type AskUserResult } from "./types.js";
 import { executeAskUser } from "./tool.js";
+import { formatAnswer } from "./format.ts";
 
 export default function askUserExtension(pi: ExtensionAPI) {
   pi.registerTool({
@@ -46,10 +47,7 @@ Guidelines:
         contentText = result.answers
           .map((a, i) => {
             const prefix = `Q${i + 1}: ${a.question}\nA${i + 1}: `;
-            if (a.wasCustom) {
-              return prefix + `(custom) ${a.answer}`;
-            }
-            return prefix + a.answer;
+            return prefix + formatAnswer(a, params.questions[i] ?? {});
           })
           .join("\n\n");
       } else if (result.pendingFile) {

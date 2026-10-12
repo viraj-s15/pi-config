@@ -92,3 +92,13 @@ test("single-select is unchanged: a number key picks and submits", async () => {
 	p.press("2");
 	assert.equal((await answer)!.answers[0]!.answer, "Beta");
 });
+
+test("the model sees which answers were ticked and which were typed", async () => {
+	const { formatAnswer } = await import("../format.ts");
+	const q = question(true);
+	assert.equal(formatAnswer({ question: q.question, answer: ["Alpha", "think of more, drastic is fine"], wasCustom: true }, q),
+		"Alpha; (custom) think of more, drastic is fine");
+	assert.equal(formatAnswer({ question: q.question, answer: ["Alpha", "Gamma"], wasCustom: false }, q), "Alpha; Gamma");
+	assert.equal(formatAnswer({ question: q.question, answer: "my own words", wasCustom: true }, question()), "(custom) my own words");
+	assert.equal(formatAnswer({ question: q.question, answer: "Beta", wasCustom: false }, question()), "Beta");
+});
