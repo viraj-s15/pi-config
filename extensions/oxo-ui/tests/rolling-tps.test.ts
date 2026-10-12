@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { tmpdir } from "node:os";
-import { piModuleUrl } from "../../../tests/pi-runtime.mjs";
 import oxoExtension from "../index.ts";
-import type { AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
-
-const { processResponsesStream } = await import(piModuleUrl("@earendil-works/pi-ai/dist/api/openai-responses-shared.js"));
 
 const SHARED_TPS = Symbol.for("pi-config.oxo-ui.rolling-tps");
 
@@ -125,12 +121,12 @@ test("a completed answer refreshes stats once, without another scan at agent_end
 
 test("first response initializes TPS; later responses blend into the one previous number", t => {
   const f = fixture(t);
-  f.response(100);
-  assert.equal(f.rate(), 100);
-  f.response(20);
-  assert.equal(f.rate(), 60);
-  f.response(40);
-  assert.equal(f.rate(), 50);
+  f.response(400, 2000);
+  assert.equal(f.rate(), 200);
+  f.response(200, 2000);
+  assert.equal(f.rate(), 150);
+  f.response(300, 2000);
+  assert.equal(f.rate(), 150);
   assert.deepEqual(f.branch, []);
 });
 
@@ -139,118 +135,143 @@ test("footer identifies the metric as an average", t => {
   assert.match(f.text(), /– avg t\/s/);
 });
 
+test("the clock runs from the start of the reply to its end, so thinking and tool arguments count", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("thinking_delta");
+  t.mock.timers.tick(4000);
+  f.delta();
+  t.mock.timers.tick(1000);
+  f.end(1000, "stop", "assistant", 600);
+  assert.equal(f.rate(), 200, "1000 output tokens over the 5 s reply, not 400 answer tokens over the last second");
+});
+
+test("an answer that arrives in one burst after silent thinking is measured over the whole reply", t => {
+  const f = fixture(t);
+  // The 467 t/s case: Opus thinks for ~20 s, then the answer text lands within a second or two.
+  f.emit("message_start", { message: { role: "assistant" } });
+  t.mock.timers.tick(20000);
+  for (let i = 0; i < 73; i++) f.delta();
+  f.end(2046, "stop", "assistant", 1193);
+  assert.equal(f.rate(), 102);
+});
+
+test("tool-call replies are samples too", t => {
+  const f = fixture(t);
+  f.emit("message_start", { message: { role: "assistant" } });
+  f.delta("toolcall_delta");
+  t.mock.timers.tick(2000);
+  f.emit("message_end", { message: {
+    role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "c", name: "write", arguments: {} }],
+    usage: { input: 0, output: 400, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }});
+  assert.equal(f.rate(), 200);
+});
+
 test("streaming leaves the previous completed average unchanged", t => {
   const f = fixture(t);
-  f.response(40);
+  f.response(400, 2000);
   f.emit("agent_start");
   f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
+  f.stream(3000);
+  assert.equal(f.rate(), 200);
   f.stream(1000);
-  assert.equal(f.rate(), 40);
-  f.stream(1000);
-  f.end(40);
-  assert.equal(f.rate(), 30); // blend 40 with the new 20 t/s response
+  f.end(400);
+  assert.equal(f.rate(), 150, "blend 200 with the new 100 t/s reply");
 });
 
 test("average stays visible through idle time and the next agent start", t => {
   const f = fixture(t);
-  f.response(80);
+  f.response(400, 2000);
   f.emit("agent_end");
   t.mock.timers.tick(30000);
-  assert.equal(f.rate(), 80);
+  assert.equal(f.rate(), 200);
   f.emit("agent_start");
-  assert.equal(f.rate(), 80);
+  assert.equal(f.rate(), 200);
 });
 
-test("tool time and pre-token waiting are excluded from the next response's rate", t => {
+test("time between replies (tools running, the user typing) is not part of any reply", t => {
   const f = fixture(t);
-  f.response(100);
+  f.response(400, 2000);
   t.mock.timers.tick(60000);
-  f.emit("message_start", { message: { role: "assistant" } });
-  t.mock.timers.tick(5000);
-  f.delta();
-  f.stream(1000);
-  f.end(20);
-  assert.equal(f.rate(), 60);
+  f.response(400, 4000);
+  assert.equal(f.rate(), 150);
 });
 
-test("errored and aborted responses do not change the average", t => {
+test("errored and aborted replies do not change the average", t => {
   const f = fixture(t);
-  f.response(100);
-  f.response(20, 1000, "error");
-  assert.equal(f.rate(), 100);
-  f.response(40, 1000, "aborted");
-  assert.equal(f.rate(), 100);
+  f.response(400, 2000);
+  f.response(400, 4000, "error");
+  assert.equal(f.rate(), 200);
+  f.response(400, 4000, "aborted");
+  assert.equal(f.rate(), 200);
 });
 
-test("zero/non-finite output and responses streamed for under a second are ignored", t => {
+test("small replies, sub-second replies and broken usage are ignored", t => {
   const f = fixture(t);
-  f.response(100);
-  f.response(0);
-  f.response(20, 100);
-  f.response(Number.NaN);
-  f.response(Number.POSITIVE_INFINITY);
-  assert.equal(f.rate(), 100);
+  f.response(400, 2000);
+  f.response(199, 4000); // startup time would dominate the rate
+  f.response(400, 999);
+  f.response(0, 2000);
+  f.response(Number.NaN, 2000);
+  f.response(Number.POSITIVE_INFINITY, 2000);
+  assert.equal(f.rate(), 200);
   assert.doesNotMatch(f.text(), /NaN|Infinity/);
 });
 
-test("a message without streamed deltas cannot reuse another response's start time", t => {
+test("a reply needs its own start: a stray message_end cannot reuse an earlier one", t => {
   const f = fixture(t);
-  f.response(100);
-  f.emit("message_start", { message: { role: "assistant" } });
-  t.mock.timers.tick(1000);
-  f.end(20);
-  assert.equal(f.rate(), 100);
+  f.response(400, 2000);
+  t.mock.timers.tick(10000);
+  f.end(4000);
+  assert.equal(f.rate(), 200);
 });
 
 test("user messages cannot change TPS or reset an assistant's pending timing", t => {
   const f = fixture(t);
-  f.response(100);
   f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(500);
+  t.mock.timers.tick(1000);
   f.emit("message_start", { message: { role: "user" } });
   f.end(10, "stop", "user");
-  f.stream(500);
-  f.end(20);
-  assert.equal(f.rate(), 60);
+  t.mock.timers.tick(1000);
+  f.end(400);
+  assert.equal(f.rate(), 200);
 });
 
-test("a new session clears the average and any pending response timestamp", t => {
+test("a new session clears the average and any pending reply", t => {
   const f = fixture(t);
-  f.response(100);
+  f.response(400, 2000);
   f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  t.mock.timers.tick(1000);
+  t.mock.timers.tick(2000);
   f.emit("session_start", { reason: "new" });
   assert.equal(f.shows(), "–");
-  f.end(20);
+  f.end(400);
   assert.equal(f.shows(), "–");
-  f.response(40);
-  assert.equal(f.rate(), 40);
+  f.response(300, 2000);
+  assert.equal(f.rate(), 150);
 });
 
-test("with no completed answer yet the footer shows a dash, not a zero", t => {
+test("with no completed reply yet the footer shows a dash, not a zero", t => {
   const f = fixture(t);
   assert.equal(f.shows(), "–");
 });
 
 test("reloading keeps this session's average, so /reload does not blank the footer", t => {
   const f = fixture(t);
-  f.response(100);
-  f.response(60);
-  assert.equal(f.rate(), 80);
+  f.response(400, 2000);
+  f.response(240, 2000);
+  assert.equal(f.rate(), 160);
   f.register("reload");
-  assert.equal(f.rate(), 80, "average survives the reload");
-  f.response(20);
-  assert.equal(f.rate(), 50, "and keeps blending afterwards");
+  assert.equal(f.rate(), 160, "average survives the reload");
+  f.response(400, 10000);
+  assert.equal(f.rate(), 100, "and keeps blending afterwards");
 });
 
 test("resuming, forking, a new session and a fresh start all begin without an average", t => {
   const f = fixture(t);
   for (const reason of ["resume", "fork", "new", "startup", undefined]) {
-    f.response(100);
-    assert.equal(f.rate(), 100);
+    f.response(400, 2000);
+    assert.equal(f.rate(), 200);
     f.register(reason);
     assert.equal(f.shows(), "–", `reason ${reason}`);
   }
@@ -258,7 +279,7 @@ test("resuming, forking, a new session and a fresh start all begin without an av
 
 test("a reload still resets an average that a session change already cleared", t => {
   const f = fixture(t);
-  f.response(100);
+  f.response(400, 2000);
   f.emit("session_start", { reason: "new" });
   f.register("reload");
   assert.equal(f.shows(), "–");
@@ -266,303 +287,14 @@ test("a reload still resets an average that a session change already cleared", t
 
 test("the carried-over average is memory only", t => {
   const f = fixture(t);
-  f.response(100);
+  f.response(400, 2000);
   assert.equal(typeof (globalThis as any)[SHARED_TPS], "number");
   assert.doesNotThrow(() => f.register("reload"), "appendEntry/sendMessage would throw in this fixture");
 });
 
-test("hidden reasoning is subtracted before computing and blending answer TPS", t => {
+test("low rates keep one decimal", t => {
   const f = fixture(t);
-  // 200 answer tokens over 5 seconds = 40 TPS, not 84 total-output TPS.
-  f.response(420, 5000, "stop", 220);
-  assert.equal(f.rate(), 40);
-  // 20 answer tokens over 1 second blends with the previous 40 to give 30.
-  f.response(400, 1000, "stop", 380);
-  assert.equal(f.rate(), 30);
-});
-
-type ResponsesFixtureEvent =
-  | { type: "response.output_item.added"; output_index: number; item:
-      | { id: string; type: "function_call"; status: string; call_id: string; name: string; arguments: string }
-      | { id: string; type: "reasoning"; summary: unknown[]; content: unknown[] }
-      | { id: string; type: "message"; status: string; role: "assistant"; content: unknown[]; phase: "final_answer" } }
-  | { type: "response.output_item.done"; output_index: number; item:
-      | { id: string; type: "function_call"; status: string; call_id: string; name: string; arguments: string }
-      | { id: string; type: "reasoning"; summary: { type: "summary_text"; text: string }[]; content: unknown[] }
-      | { id: string; type: "message"; status: string; role: "assistant"; phase: "final_answer";
-          content: { type: "output_text"; text: string; annotations: unknown[] }[] } }
-  | { type: "response.reasoning_summary_text.delta"; output_index: number; delta: string }
-  | { type: "response.output_text.delta"; output_index: number; content_index: number; delta: string }
-  | { type: "response.completed"; response: { id: string; object: "response"; status: "completed"; output: unknown[];
-      usage: { input_tokens: number; output_tokens: number; total_tokens: number;
-        input_tokens_details?: { cached_tokens: number }; output_tokens_details?: { reasoning_tokens: number } } } };
-
-test("sanitized OpenAI Responses protocol fixture normalizes reasoning, tool use, text, and usage", async t => {
-  const f = fixture(t);
-  const model = {
-    api: "openai-responses", provider: "openai", id: "fixture-model",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  } as Model<"openai-responses">;
-  const baseMessage = (): AssistantMessage => ({
-    role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-    stopReason: "pending", timestamp: 0,
-  });
-  const normalize = async (events: ResponsesFixtureEvent[]) => {
-    const message = baseMessage();
-    const normalized: AssistantMessageEvent[] = [];
-    await processResponsesStream(
-      (async function* () { yield* events; })(),
-      message, { push: (event: AssistantMessageEvent) => normalized.push(event) }, model,
-    );
-    return { message, normalized };
-  };
-
-  // Sanitized synthetic protocol fixture, shaped for Pi 1.1.0's installed Responses adapter;
-  // it is not a captured live provider trace. The supplied 392/217 usage values are recorded
-  // from an actual session summary; the surrounding event sequence is constructed for this test.
-  const toolTurn = await normalize([
-    { type: "response.output_item.added", output_index: 0,
-      item: { id: "fc_fixture", type: "function_call", status: "in_progress", call_id: "call_fixture", name: "read", arguments: "{}" } },
-    { type: "response.output_item.done", output_index: 0,
-      item: { id: "fc_fixture", type: "function_call", status: "completed", call_id: "call_fixture", name: "read", arguments: "{}" } },
-    { type: "response.completed", response: { id: "resp_tool", object: "response", status: "completed",
-      output: [], usage: { input_tokens: 10, output_tokens: 8, total_tokens: 18 } } },
-  ]);
-  assert.equal(toolTurn.message.stopReason, "toolUse");
-  assert.ok(toolTurn.message.content.some(block => block.type === "toolCall"));
-
-  const finalAnswer = await normalize([
-    { type: "response.output_item.added", output_index: 0,
-      item: { id: "rs_fixture", type: "reasoning", summary: [], content: [] } },
-    { type: "response.reasoning_summary_text.delta", output_index: 0, delta: "Planning before answer." },
-    { type: "response.output_item.done", output_index: 0,
-      item: { id: "rs_fixture", type: "reasoning", summary: [{ type: "summary_text", text: "Planning before answer." }], content: [] } },
-    { type: "response.output_item.added", output_index: 1,
-      item: { id: "msg_fixture", type: "message", status: "in_progress", role: "assistant", content: [], phase: "final_answer" } },
-    { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "A sanitized answer " },
-    { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "streamed in pieces." },
-    { type: "response.output_item.done", output_index: 1,
-      item: { id: "msg_fixture", type: "message", status: "completed", role: "assistant", phase: "final_answer",
-        content: [{ type: "output_text", text: "A sanitized answer streamed in pieces.", annotations: [] }] } },
-    { type: "response.completed", response: { id: "resp_final", object: "response", status: "completed",
-      output: [], usage: { input_tokens: 30, output_tokens: 392, total_tokens: 422,
-        input_tokens_details: { cached_tokens: 5 }, output_tokens_details: { reasoning_tokens: 217 } } } },
-  ]);
-  assert.equal(finalAnswer.message.usage.output, 392);
-  assert.equal(finalAnswer.message.usage.reasoning, 217);
-  assert.ok(finalAnswer.normalized.some(event => event.type === "thinking_delta"));
-  assert.equal(finalAnswer.normalized.filter(event => event.type === "text_delta").length, 2);
-
-  f.emit("message_start", { message: { role: "assistant" } });
-  for (const event of toolTurn.normalized) f.emit("message_update", { assistantMessageEvent: event });
-  f.emit("message_end", { message: toolTurn.message });
-  assert.equal(f.shows(), "–", "tool-use turn does not initialize TPS");
-
-  f.emit("message_start", { message: { role: "assistant" } });
-  // The fixture has two coarse text events; replay them as one-character slices 100 ms apart, the way
-  // a steady stream arrives, so the answer is measured over a real window.
-  let slices = 0;
-  for (const event of finalAnswer.normalized) {
-    if (event.type !== "text_delta") { f.emit("message_update", { assistantMessageEvent: event }); continue; }
-    for (const char of event.delta) {
-      if (slices++) t.mock.timers.tick(100);
-      f.emit("message_update", { assistantMessageEvent: { ...event, delta: char } });
-    }
-  }
-  f.emit("message_end", { message: finalAnswer.message });
-  const windowSeconds = ((slices - 1) * 100) / 1000;
-  assert.equal(f.rate(), Math.round(175 / windowSeconds), "175 answer tokens over the streaming window; reasoning is excluded");
-});
-
-test("reasoning and tool-argument deltas cannot start the answer-text clock", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta("thinking_delta");
-  t.mock.timers.tick(10000);
-  f.delta("toolcall_delta");
-  t.mock.timers.tick(10000);
-  f.delta();
-  f.stream(1000);
-  f.end(420, "stop", "assistant", 380);
-  assert.equal(f.rate(), 40);
-});
-
-test("an empty text delta cannot start timing before answer text is delivered", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta("text_delta", "");
-  t.mock.timers.tick(10000);
-  f.delta();
-  f.stream(1000);
-  f.end(40);
-  assert.equal(f.rate(), 40);
-});
-
-test("tool-call responses with commentary do not pollute the answer average", t => {
-  const f = fixture(t);
-  f.response(40);
-  f.response(500, 1000, "toolUse", 100);
-  assert.equal(f.rate(), 40);
-  f.response(20);
-  assert.equal(f.rate(), 30);
-});
-
-test("tool-call-only and reasoning-only bursts cannot initialize the average", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta("toolcall_delta");
-  t.mock.timers.tick(1000);
-  f.end(500, "toolUse");
-  assert.equal(f.shows(), "–");
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta("thinking_delta");
-  t.mock.timers.tick(1000);
-  f.end(500, "stop", "assistant", 500);
-  assert.equal(f.shows(), "–");
-});
-
-test("a tool call in finalized content excludes that message even with stop reason stop", t => {
-  const f = fixture(t);
-  f.response(40);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  t.mock.timers.tick(1000);
-  f.emit("message_end", { message: {
-    role: "assistant", stopReason: "stop", content: [{ type: "text", text: "commentary" },
-      { type: "toolCall", id: "call", name: "read", arguments: { path: "file" } }],
-    usage: { input: 0, output: 500, reasoning: 100, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
-  }});
-  assert.equal(f.rate(), 40);
-});
-
-test("invalid reasoning breakdowns do not create inflated or negative samples", t => {
-  const f = fixture(t);
-  f.response(40);
-  for (const reasoning of [-20, 101, Number.NaN, Number.POSITIVE_INFINITY, 100]) {
-    f.response(100, 1000, "stop", reasoning);
-    assert.equal(f.rate(), 40);
-  }
-});
-
-test("reported reasoning is excluded from truncated final answers too", t => {
-  const f = fixture(t);
-  f.response(420, 1000, "length", 380);
-  assert.equal(f.rate(), 40);
-});
-
-test("thinking without a reported token breakdown is skipped rather than counted as answer tokens", t => {
-  const f = fixture(t);
-  f.response(40);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  t.mock.timers.tick(1000);
-  f.emit("message_end", { message: {
-    role: "assistant", stopReason: "stop", content: [{ type: "thinking", thinking: "reasoning" }, { type: "text", text: "answer" }],
-    usage: { input: 0, output: 500, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
-  }});
-  assert.equal(f.rate(), 40);
-});
-
-test("fractional TPS keeps existing low-rate decimal formatting", t => {
-  const f = fixture(t);
-  f.response(5, 2000);
+  f.response(200, 80000);
   assert.equal(f.rate(), 2.5);
-  f.response(3, 2000);
-  assert.equal(f.rate(), 2);
-});
-
-// ---- bursty and stalled streams (Sonnet 5.5 with thinking delivers its answer in one burst) ----
-
-test("an answer delivered in one burst is ignored: it has no streaming window to measure", t => {
-  const f = fixture(t);
-  f.response(100);
-  // As logged from a real thinking answer: 73 text chunks within 2 ms of each other.
-  f.emit("message_start", { message: { role: "assistant" } });
-  t.mock.timers.tick(3000);
-  for (let i = 0; i < 73; i++) f.delta();
-  f.end(398, "stop", "assistant", 83);
-  assert.equal(f.rate(), 100, "average unchanged");
-});
-
-test("a burst split in two by the network is still ignored", t => {
-  const f = fixture(t);
-  f.response(100);
-  f.emit("message_start", { message: { role: "assistant" } });
-  for (let i = 0; i < 40; i++) f.delta();
-  t.mock.timers.tick(400); // long enough to pass the old 0.3 s check, which then reported thousands of t/s
-  for (let i = 0; i < 40; i++) f.delta();
-  f.end(1200);
-  assert.equal(f.rate(), 100);
-});
-
-test("two bursts a couple of seconds apart are ignored too", t => {
-  const f = fixture(t);
-  f.response(100);
-  f.emit("message_start", { message: { role: "assistant" } });
-  for (let i = 0; i < 30; i++) f.delta();
-  t.mock.timers.tick(2000);
-  for (let i = 0; i < 30; i++) f.delta();
-  f.end(900);
-  assert.equal(f.rate(), 100, "a 2 s window with a 2 s gap is not a stream");
-});
-
-test("a stream that stalls for most of its window is ignored", t => {
-  const f = fixture(t);
-  f.response(100);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(1000);
-  t.mock.timers.tick(4000); // network stall
-  f.delta();
-  f.stream(1000);
-  f.end(600);
-  assert.equal(f.rate(), 100);
-});
-
-test("a short pause inside a steady stream is fine", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(3000);
-  t.mock.timers.tick(600);
-  f.delta();
-  f.stream(2000);
-  f.end(500);
-  assert.equal(f.rate(), 89, "500 tokens over the 5.6 s the text took to arrive");
-});
-
-test("the window runs to the last text chunk, not to the end of the message", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(2000);
-  t.mock.timers.tick(500); // usage and stop events arrive after the text
-  f.end(200);
-  assert.equal(f.rate(), 100);
-});
-
-test("a steady five-second stream reports its real rate", t => {
-  const f = fixture(t);
-  f.response(100);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(5000, 150);
-  f.end(630);
-  assert.equal(f.rate(), 113, "630 tokens in 5 s is 126 t/s, blended with the earlier 100");
-});
-
-test("the streaming window must reach one second", t => {
-  const f = fixture(t);
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(999);
-  f.end(50);
-  assert.equal(f.shows(), "–", "999 ms is too short");
-  f.emit("message_start", { message: { role: "assistant" } });
-  f.delta();
-  f.stream(1000);
-  f.end(50);
-  assert.equal(f.rate(), 50, "1000 ms is enough");
+  assert.match(f.text(), /2\.5 avg t\/s/);
 });

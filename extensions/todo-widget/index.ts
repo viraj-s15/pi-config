@@ -9,7 +9,8 @@
  *
  * Right corner of the first line: purple "N subagents" pill while subagents are running.
  * One line by default; Ctrl+Shift+E (or /todo-widget expand|collapse) shows one row per todo.
- * Done todos only show if they were finished during this session. When every todo is done the
+ * Open and done todos only show if they were touched during this session (in-progress ones always
+ * show), so a leftover todo from earlier work does not sit there forever. When every todo is done the
  * list stays for a few seconds, then disappears (those todos are not shown again). Command: /todo-widget [on|off]
  */
 
@@ -85,7 +86,7 @@ function todosDir(cwd: string): string {
 	return resolve(cwd, o || ".pi/todos");
 }
 
-function readTodos(cwd: string, sessionStart: number): Item[] {
+export function readTodos(cwd: string, sessionStart: number): Item[] {
 	const dir = todosDir(cwd);
 	let files: string[];
 	try {
@@ -102,8 +103,8 @@ function readTodos(cwd: string, sessionStart: number): Item[] {
 			const status = String(fm.status ?? "open").toLowerCase();
 			const closed = status === "closed" || status === "done";
 			const mtime = statSync(path).mtimeMs;
-			if (closed && mtime < sessionStart) continue; // old finished work: not interesting here
 			const working = !closed && (Boolean(fm.assigned_to_session) || WORKING_STATUS.has(status));
+			if (!working && mtime < sessionStart) continue; // finished or untouched before this session: not live progress
 			items.push({
 				id: f.replace(/\.md$/, ""),
 				title: fm.title.trim() || "(untitled)",
@@ -255,6 +256,15 @@ class TodoWidget {
 	}
 }
 
+// /reload re-imports this file but is the same session, so the cutoff is kept on globalThis; any
+// other session start (startup, new, resume, fork) begins a new one.
+const CUTOFF = Symbol.for("pi-config.todo-widget.session-start");
+export function sessionCutoff(reason: string | undefined, now = Date.now()): number {
+	const shared = globalThis as { [CUTOFF]?: number };
+	if (reason !== "reload" || shared[CUTOFF] === undefined) shared[CUTOFF] = now;
+	return shared[CUTOFF]!;
+}
+
 // ---------- extension ----------
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
@@ -314,8 +324,8 @@ export default function (pi: ExtensionAPI) {
 		rerender?.();
 	});
 
-	pi.on("session_start", (_e, ctx) => {
-		sessionStart = Date.now();
+	pi.on("session_start", (e, ctx) => {
+		sessionStart = sessionCutoff((e as { reason?: string }).reason);
 		dismissed.clear();
 		if (enabled) install(ctx);
 	});

@@ -431,7 +431,8 @@ function shortPath(cwd: string): string {
 // /reload re-imports this file but keeps the process, so the running average is parked here
 // (memory only) to survive it. Any other session start (new, resume, fork, startup) clears it.
 const SHARED_TPS = Symbol.for("pi-config.oxo-ui.rolling-tps");
-const MIN_WINDOW_MS = 1000; // an answer must have streamed for at least this long to give a rate
+const MIN_WINDOW_MS = 1000; // a reply must take at least this long to give a rate
+const MIN_OUTPUT_TOKENS = 200; // below this, request startup time dominates and the rate means little
 const shared = globalThis as { [SHARED_TPS]?: number };
 
 export default function (pi: ExtensionAPI) {
@@ -441,11 +442,8 @@ export default function (pi: ExtensionAPI) {
 	let lastFailed = false;
 	let cacheRate: number | undefined; // last response: cacheRead / total prompt tokens
 	let averageTps: number | undefined; // memory-only smoothing: (previous average + latest response rate) / 2
-	// Answer-text delivery: first and last non-empty text delta, and the longest pause between two.
-	// Reasoning and tool-call deltas never count.
-	let answerStart: number | undefined;
-	let answerLast = 0;
-	let answerMaxGap = 0;
+	// When the current assistant reply started streaming (Pi's message_start: the provider responded).
+	let replyStart: number | undefined;
 	let cost = 0;
 	let requestRender: (() => void) | undefined;
 	let refreshing = false;
@@ -585,9 +583,7 @@ export default function (pi: ExtensionAPI) {
 		statsDirty = true;
 		averageTps = e.reason === "reload" ? shared[SHARED_TPS] : undefined;
 		shared[SHARED_TPS] = averageTps;
-		answerStart = undefined;
-		answerLast = 0;
-		answerMaxGap = 0;
+		replyStart = undefined;
 		if (enabled) install(ctx);
 	});
 	pi.on("agent_start", (_e, _ctx) => {
@@ -599,49 +595,25 @@ export default function (pi: ExtensionAPI) {
 		refresh(ctx);
 	});
 	pi.on("message_start", (e, _ctx) => {
-		if (e.message.role !== "assistant") return;
-		answerStart = undefined;
-		answerLast = 0;
-		answerMaxGap = 0;
-	});
-	pi.on("message_update", (e, _ctx) => {
-		const ev = e.assistantMessageEvent;
-		if (ev.type !== "text_delta" || ev.delta.length === 0) return;
-		const now = Date.now();
-		if (answerStart === undefined) answerStart = now;
-		else answerMaxGap = Math.max(answerMaxGap, now - answerLast);
-		answerLast = now;
+		if (e.message.role === "assistant") replyStart = Date.now();
 	});
 	pi.on("message_end", (e, _ctx) => {
 		if (e.message.role !== "assistant") return;
 		statsDirty = true;
 		const m = e.message as AssistantMessage;
-		const finalAnswer = (m.stopReason === "stop" || m.stopReason === "length") &&
-			!m.content.some(block => block.type === "toolCall");
-		if (answerStart !== undefined && finalAnswer) {
-			// Measure only text that really streamed. Some answers arrive in one burst (Sonnet 5.5 with
-			// thinking does): the window is then a few milliseconds, or a burst split by the network, and
-			// the "rate" is in the thousands. A stream counts if the text kept arriving for at least a
-			// second and no single pause took up more than half of that window.
-			const windowMs = answerLast - answerStart;
-			// Output includes reasoning tokens, whose generation may precede the visible stream. Count
-			// only answer tokens over the time the answer text took to arrive.
-			const reasoning = m.usage.reasoning ?? 0;
-			const answerTokens = m.usage.output - reasoning;
-			const unknownReasoning = m.usage.reasoning === undefined && m.content.some(block => block.type === "thinking");
-			const steady = windowMs >= MIN_WINDOW_MS && answerMaxGap <= windowMs / 2;
-			if (steady && Number.isFinite(m.usage.output) && Number.isFinite(reasoning) &&
-				reasoning >= 0 && answerTokens > 0 && !unknownReasoning) {
-				const responseTps = answerTokens / (windowMs / 1000);
-				if (Number.isFinite(responseTps)) {
-					averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
-					shared[SHARED_TPS] = averageTps;
-				}
-			}
+		// Every output token (thinking, answer, tool arguments) over the whole reply. Providers think
+		// silently or stream it in bursts and often deliver the answer in one quick spurt, so any clock
+		// based on when text arrives can read several times too fast (Opus showed 467 t/s). This one
+		// cannot: it only errs low, by the second or so the provider spends reading the prompt.
+		const windowMs = replyStart === undefined ? 0 : Date.now() - replyStart;
+		replyStart = undefined;
+		const output = m.usage.output;
+		const completed = m.stopReason === "stop" || m.stopReason === "length" || m.stopReason === "toolUse";
+		if (completed && windowMs >= MIN_WINDOW_MS && Number.isFinite(output) && output >= MIN_OUTPUT_TOKENS) {
+			const responseTps = output / (windowMs / 1000);
+			averageTps = averageTps === undefined ? responseTps : (averageTps + responseTps) / 2;
+			shared[SHARED_TPS] = averageTps;
 		}
-		answerStart = undefined;
-		answerLast = 0;
-		answerMaxGap = 0;
 		cacheRate = cacheRateOf(m);
 		requestRender?.();
 	});

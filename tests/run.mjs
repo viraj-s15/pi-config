@@ -10,7 +10,7 @@ const suites = {
   "compact-tools": ["../extensions/compact-tools/tests/summaries.test.ts", "../extensions/compact-tools/tests/renderer.test.ts", "../extensions/compact-tools/tests/tool-groups.test.ts"],
   notifications: "../extensions/notifications/tests/notifications.test.ts",
   actions: "../extensions/actions/tests/actions.test.mjs",
-  "compact-tools": ["../extensions/compact-tools/tests/summaries.test.ts", "../extensions/compact-tools/tests/renderer.test.ts", "../extensions/compact-tools/tests/tool-groups.test.ts"],
+  "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };
 const requested = process.argv.slice(2);

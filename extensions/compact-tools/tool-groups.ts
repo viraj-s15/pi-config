@@ -1,5 +1,6 @@
 import { Container, MouseRegion, Spacer, truncateToWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { commandProgram } from "./summaries.ts";
 
 // v2 holds the state of this version. The unversioned key belonged to earlier versions of this file:
 // the first only tracked parents and never patched render, the second patched render with a closure
@@ -15,6 +16,7 @@ interface ToolExecutionRuntimeAdapter {
 	result?: { isError?: boolean };
 	toolCallId: string;
 	toolName: string;
+	args?: Record<string, unknown>;
 	rendererState?: Record<PropertyKey, unknown>;
 	ui?: { requestRender?: () => void };
 }
@@ -56,7 +58,7 @@ class HeaderLine implements Component {
 	invalidate(): void {}
 }
 
-/** "Tests 228 passed 0 failed · Git commit abc1234 · Bash ×2 · Read ×3": what happened, in order of interest. */
+/** "Tests 228 passed 0 failed · rg ×2 · sed · Read ×3": recognised results first, then what ran. */
 function describeTools(tools: ToolExecutionComponent[]): string {
 	const highlights: string[] = [];
 	const counts = new Map<string, number>();
@@ -67,7 +69,9 @@ function describeTools(tools: ToolExecutionComponent[]): string {
 			if (!highlights.includes(observed)) highlights.push(observed);
 			continue;
 		}
-		const title = titleOf(runtime.toolName);
+		const command = runtime.args?.command;
+		const program = runtime.toolName === "bash" && typeof command === "string" ? commandProgram(command) : undefined;
+		const title = program ?? titleOf(runtime.toolName);
 		counts.set(title, (counts.get(title) ?? 0) + 1);
 	}
 	return [...highlights, ...[...counts].map(([title, count]) => (count > 1 ? `${title} ×${count}` : title))].join(" · ");
@@ -87,7 +91,8 @@ export class ToolGroupComponent extends Container {
 		this.header = new MouseRegion(
 			new HeaderLine(() => {
 				const what = describeTools(this.tools);
-				return ` ${fg(OK, "●")} ${fg(TEXT, `${this.tools.length} successful tools`)}${what ? fg(DIM, ` · ${what}`) : ""}${fg(DIM, ` · click to ${this.expanded ? "collapse" : "expand"}`)}`;
+				// Failures always split groups, so "successful" goes without saying; the arrow says it opens.
+				return ` ${fg(OK, this.expanded ? "▾" : "▸")} ${fg(TEXT, `${this.tools.length} tools`)}${what ? fg(DIM, ` · ${what}`) : ""}`;
 			}),
 			(event: TuiMouseEvent) => {
 				if (event.type !== "click" || event.button !== "left") return undefined;

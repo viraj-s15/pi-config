@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { operationLabel, summarizeOperation } from "../summaries.ts";
+import { operationLabel, summarizeOperation, commandProgram } from "../summaries.ts";
 
 test("recognizes node tests/run.mjs and complete Node runner counts", () => {
 	assert.equal(operationLabel("bash", { command: "node tests/run.mjs" }), "Tests");
@@ -97,4 +97,14 @@ test("git commit and push are recognized inside pipelines and redirects", () => 
 	assert.equal(operationLabel("bash", { command: "git add -A && git commit -m 'x' 2>&1 | tail -3" }), "Git commit");
 	assert.equal(operationLabel("bash", { command: "git push origin main 2>&1" }), "Git push");
 	assert.equal(summarizeOperation("bash", { command: "git commit -m x 2>&1 | tail -3" }, "[main abc1234] x\n 2 files changed, 4 insertions(+)", false), "Git commit abc1234 · 2 files");
+});
+
+test("commandProgram names the program a shell command is really about", () => {
+	assert.equal(commandProgram("rg -n foo src | head -30"), "rg");
+	assert.equal(commandProgram("cd ~/x && sed -n 1,40p f"), "sed");
+	assert.equal(commandProgram("cat notes.txt | rg TODO"), "rg", "plumbing like cat/head/tail is skipped");
+	assert.equal(commandProgram("FOO=1 /usr/local/bin/node x.js 2>&1 | tail -3"), "node", "env prefixes and paths are dropped");
+	assert.equal(commandProgram("python3 - <<'PY'\nprint(\"it's\")\nPY"), "python3", "heredoc bodies are not commands");
+	assert.equal(commandProgram("echo hi"), "echo", "plumbing alone still names something");
+	assert.equal(commandProgram("x=$(date)"), undefined, "too complex to read");
 });

@@ -112,6 +112,37 @@ function commandWords(segment: string): string[] | undefined {
 	return words;
 }
 
+// Plumbing around the real work: skipped when naming what a command did, unless it is all there is.
+const PLUMBING = new Set(["cd", "pushd", "popd", "echo", "printf", "export", "set", "unset", "true", "false", "sleep",
+	"cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "tee", "env", "source", ".", "exit", "test", "["]);
+
+/**
+ * The program a shell command is about: `rg -n x | head` is "rg", `cd src && sed …` is "sed".
+ * Lines are read one at a time, so a heredoc body (`python3 - <<'PY'`) never counts as commands.
+ */
+export function commandProgram(command: string): string | undefined {
+	let fallback: string | undefined;
+	let parsed = false;
+	for (const line of command.split("\n")) {
+		const segments = executableSegments(line);
+		if (!segments) {
+			if (!parsed) return undefined; // the first line is already too complex to read
+			continue;
+		}
+		parsed = true;
+		for (const segment of segments) {
+			const word = commandWords(segment)?.[0];
+			if (!word || /^[({]|^(?:fi|done|esac|then|do|else)$/.test(word)) continue;
+			const program = word.slice(word.lastIndexOf("/") + 1);
+			if (!program) continue;
+			if (!PLUMBING.has(program)) return program;
+			fallback ??= program;
+		}
+		if (/<<-?\s*['"]?\w+/.test(line)) break; // the rest is heredoc input
+	}
+	return fallback;
+}
+
 function isTestCommand(command: string): boolean {
 	const segments = executableSegments(command);
 	if (!segments) return false;
