@@ -18,5 +18,12 @@ export async function createTestLoader() {
   const alias = Object.fromEntries(["pi-ai", "pi-coding-agent", "pi-tui", "pi-agent-core"].map(name => [
     `@earendil-works/${name}`, join(modules, "@earendil-works", name, "dist/index.js"),
   ]));
+  // Pi maps the old typebox package name onto the one it ships; do the same here.
+  const typebox = JSON.parse(readFileSync(join(modules, "typebox", "package.json"), "utf8"));
+  const entry = sub => join(modules, "typebox", typebox.exports?.[sub]?.import?.default ?? typebox.exports?.[sub]?.import ?? typebox.exports?.[sub]?.default ?? typebox.exports?.[sub] ?? "");
+  for (const [name, sub] of [["", "."], ["/compile", "./compile"], ["/value", "./value"]]) {
+    alias[`@sinclair/typebox${name}`] = entry(sub);
+    alias[`typebox${name}`] = entry(sub);
+  }
   return createJiti(import.meta.url, { alias, moduleCache: true });
 }

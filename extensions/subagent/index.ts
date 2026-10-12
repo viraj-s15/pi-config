@@ -24,12 +24,14 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { Message } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { getHub } from "./hub.ts";
+import { HubView } from "./hub-view.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const DEFAULT_MODEL = "openai/gpt-6-luna"; // GPT-6 Luna, 900K context (see models.json)
@@ -321,6 +323,9 @@ async function runSingleAgent(
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let stoppedByUser = false;
+		const hub = getHub();
+		const live = hub.add({ label, task, model, cwd: cwd ?? defaultCwd, messages: currentResult.messages, usage: currentResult.usage });
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -340,6 +345,7 @@ async function runSingleAgent(
 				} catch {
 					return;
 				}
+				hub.event(live, event);
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
@@ -385,7 +391,17 @@ async function runSingleAgent(
 				if (ended) return;
 				ended = true;
 				trackEnd();
+				const failed = code !== 0 || currentResult.stopReason === "error" || currentResult.stopReason === "aborted";
+				hub.finish(live, failed ? "failed" : "done");
 				resolve(code);
+			};
+			// Stopped from the subagent hub: this one ends, its siblings keep going.
+			live.stop = () => {
+				stoppedByUser = true;
+				proc.kill("SIGTERM");
+				setTimeout(() => {
+					if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+				}, 5000);
 			};
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
@@ -411,6 +427,11 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Subagent was aborted");
+		if (stoppedByUser) {
+			currentResult.exitCode = exitCode || 130;
+			currentResult.stopReason = "aborted";
+			currentResult.errorMessage = "Stopped by the user from the subagent hub.";
+		}
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -465,6 +486,40 @@ const SubagentParams = Type.Object({
 
 export default function (pi: ExtensionAPI) {
 	publishCount = (n) => pi.events.emit("subagents:count", n);
+
+	const openHub = async (ctx: { hasUI: boolean; ui: any }) => {
+		if (!ctx.hasUI) return;
+		await ctx.ui.custom(
+			(tui: any, _theme: unknown, _kb: unknown, done: () => void) => {
+				const hub = getHub();
+				let queued = false;
+				const redraw = () => {
+					if (queued) return;
+					queued = true;
+					setTimeout(() => {
+						queued = false;
+						tui.requestRender();
+					}, 100);
+				};
+				const off = hub.subscribe(redraw);
+				const tick = setInterval(redraw, 1000);
+				return new HubView(hub, () => {
+					off();
+					clearInterval(tick);
+					done();
+				}, () => Math.max(10, Math.floor((tui.terminal?.rows ?? 40) * 0.85)));
+			},
+			{ overlay: true, overlayOptions: { width: 100, minWidth: 50, maxHeight: "90%", anchor: "center" } },
+		);
+	};
+	pi.registerCommand("agents", {
+		description: "Subagent hub: watch running subagents, read their transcripts, stop one",
+		handler: async (_args, ctx) => openHub(ctx),
+	});
+	pi.registerShortcut("ctrl+shift+a", {
+		description: "Open the subagent hub",
+		handler: async (ctx) => openHub(ctx),
+	});
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",

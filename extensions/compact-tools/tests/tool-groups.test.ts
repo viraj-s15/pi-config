@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Container, Spacer, TuiAltScreen } from "@earendil-works/pi-tui";
+import { Container, Spacer, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, initTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { installToolGrouping } from "../tool-groups.ts";
 import { installThinkingLabels } from "../thinking-label.ts";
@@ -34,6 +34,12 @@ const withText = (text: string, thought = false, timestamp = clock++) => new Ass
 	{ role: "assistant", content: [...(thought ? [{ type: "thinking", thinking: "deciding" }] : []), { type: "text", text }], usage: usage(200, thought ? 100 : undefined), stopReason: "stop", timestamp } as any,
 	true, undefined, "● thinking…", 0,
 );
+/** Text the agent wrote alongside tool calls ("Now the README:"): a note, not an answer. */
+const note = (text: string, timestamp = clock++) => new AssistantMessageComponent(
+	{ role: "assistant", content: [{ type: "text", text }, { type: "toolCall", id: "n", name: "bash", arguments: {} }], usage: usage(50), stopReason: "toolUse", timestamp } as any,
+	true, undefined, "● thinking…", 0,
+);
+const FAINT = "\x1b[2m";
 const chatOf = (...children: any[]) => {
 	const chat = new Container();
 	for (const child of children) chat.addChild(child);
@@ -75,19 +81,7 @@ test("failures fold too, counted in red", () => {
 	} finally { s.done(); }
 });
 
-test("thinking rows fold in, and the line says how long it thought", () => {
-	const s = setup();
-	try {
-		const t1 = thinkingOnly(), t2 = thinkingOnly();
-		s.labels.recordEnd((t1 as any).lastMessage, (t1 as any).lastMessage.timestamp + 5_000);
-		s.labels.recordEnd((t2 as any).lastMessage, (t2 as any).lastMessage.timestamp + 7_000);
-		const chat = chatOf(t1, tool("a"), t2, tool("b"));
-		assert.equal(headerOf(chat), "▸ 2 tool calls · thought 12s · echo ×2");
-		assert.ok(!screen(chat).includes("● thought"), "no separate thinking rows");
-	} finally { s.done(); }
-});
-
-test("the answer's own thinking hides in the line, and comes back when the line is opened", () => {
+test("the answer's own thinking hides in the line, and closes the timeline when the line is opened", () => {
 	const s = setup();
 	try {
 		const answer = withText("Here is the answer.", true);
@@ -95,7 +89,7 @@ test("the answer's own thinking hides in the line, and comes back when the line 
 		const a = tool("a");
 		const chat = chatOf(thinkingOnly(), a, answer);
 		const collapsed = screen(chat);
-		assert.match(collapsed, /▸ 1 tool call · thought/);
+		assert.match(collapsed, /▸ Worked for \d+s · 1 tool call · thought/);
 		assert.match(collapsed, /Here is the answer\./);
 		assert.doesNotMatch(collapsed, /● thought/, "the answer's thinking row is folded away");
 		const tui = new TuiAltScreen(mouseTerminal());
@@ -107,30 +101,8 @@ test("the answer's own thinking hides in the line, and comes back when the line 
 			for (const suffix of ["M", "m"]) (tui as any).handleViewportInput(`\x1b[<0;5;${y + 1}${suffix}`);
 			tui.renderNow();
 			const open = strip(tui.getScreenLines().join("\n"));
-			assert.match(open, /▾ 1 tool call[\s\S]*● thought[\s\S]*echo a[\s\S]*● thought 3s[\s\S]*Here is the answer\./, "opened: everything, in order");
+			assert.match(open, /▾ Worked for \d+s · 1 tool call[\s\S]*│ ● thought[\s\S]*│ ● echo a[\s\S]*│\s+● thought 3s\s*\n[\s\S]*Here is the answer\./, "opened: everything, in order");
 		} finally { tui.stop({ preserveScreen: true }); }
-	} finally { s.done(); }
-});
-
-test("notes between tool calls stay visible; each stretch around them gets its own line", () => {
-	const s = setup();
-	try {
-		const chat = chatOf(thinkingOnly(), tool("a"), tool("b"), withText("Found the cause, fixing it."), tool("c"), thinkingOnly(), tool("d"), withText("Done."));
-		const text = screen(chat);
-		assert.equal((text.match(/▸ 2 tool calls/g) ?? []).length, 2);
-		assert.match(text, /▸ 2 tool calls[\s\S]*Found the cause, fixing it\.[\s\S]*▸ 2 tool calls[\s\S]*Done\./);
-	} finally { s.done(); }
-});
-
-test("a single row is left alone: one tool call, or one thinking row before an answer", () => {
-	const s = setup();
-	try {
-		const lone = screen(chatOf(tool("x"), withText("done")));
-		assert.match(lone, /● echo x/);
-		assert.doesNotMatch(lone, /tool call/);
-		const answerOnly = screen(chatOf(withText("Just an answer.", true)));
-		assert.match(answerOnly, /● thought[\s\S]*Just an answer\./);
-		assert.doesNotMatch(answerOnly, /▸/);
 	} finally { s.done(); }
 });
 
@@ -142,40 +114,6 @@ test("spacers around a stretch stay outside it; spacers inside fold away", () =>
 		assert.equal(lines[0]!.trim(), "");
 		assert.match(lines[1]!, /▸ 2 tool calls/);
 		assert.equal(lines[2]!.trim(), "");
-	} finally { s.done(); }
-});
-
-test("the current run stays live; it folds when the agent settles", () => {
-	const s = setup();
-	let requests = 0;
-	try {
-		const old = [tool("old-a"), tool("old-b")];
-		const thinking = thinkingOnly();
-		const a = tool("run-a", false, () => requests++), b = tool("run-b", false, () => requests++);
-		const chat = chatOf(...old, withText("earlier answer"), thinking, a, b);
-		s.grouping.beginRun();
-		s.grouping.messageStart((thinking as any).lastMessage.timestamp);
-		s.grouping.toolStart("run-a");
-		s.grouping.toolStart("run-b");
-		const live = screen(chat);
-		assert.match(live, /▸ 2 tool calls[\s\S]*earlier answer[\s\S]*● thought[\s\S]*echo run-a[\s\S]*echo run-b/, "earlier work is folded, this run is not");
-		const before = requests;
-		s.grouping.settle();
-		assert.ok(requests > before, "settling asks for a redraw");
-		assert.equal((screen(chat).match(/▸ 2 tool calls/g) ?? []).length, 2);
-	} finally { s.done(); }
-});
-
-test("a tool still running keeps its stretch open", () => {
-	const s = setup();
-	try {
-		const running = new ToolExecutionComponent("bash", "running", { command: "echo running" }, { outputPad: 0 }, {
-			renderShell: "self", renderCall: () => ({ render: () => ["● echo running"], invalidate() {} }),
-		} as any, { requestRender() {} } as any, "/tmp");
-		const chat = chatOf(tool("a"), running);
-		assert.match(screen(chat), /echo a[\s\S]*echo running/);
-		running.updateResult({ content: [], isError: false }, false);
-		assert.equal(headerOf(chat), "▸ 2 tool calls · echo ×2");
 	} finally { s.done(); }
 });
 
@@ -209,17 +147,6 @@ test("clicking the line opens compact rows, Ctrl+O still shows tool output, clic
 		tui.stop({ preserveScreen: true });
 		s.done();
 	}
-});
-
-test("Ctrl+O on a folded line opens it", () => {
-	const s = setup();
-	try {
-		const a = tool("a"), b = tool("b");
-		const chat = chatOf(a, b);
-		chat.render(100);
-		for (const child of chat.children) if (child instanceof ToolExecutionComponent) child.setExpanded(true);
-		assert.match(screen(chat), /▾ 2 tool calls[\s\S]*output a[\s\S]*output b/);
-	} finally { s.done(); }
 });
 
 test("the line names what ran: recognised results first, then programs and tools", () => {
@@ -262,5 +189,119 @@ test("a stale patch left by an older version after /reload is replaced, not trus
 		const chat = chatOf(tool("a"), tool("b"));
 		assert.match(screen(chat), /2 tool calls/);
 		assert.equal(staleCalls, 0, "the old wrapper is no longer in the render path");
+	} finally { s.done(); }
+});
+
+test("even a single row folds: one tool call, or the thinking before an answer", () => {
+	const s = setup();
+	try {
+		const lone = screen(chatOf(tool("x"), withText("done")));
+		assert.match(lone, /▸ 1 tool call · echo[\s\S]*done/);
+		assert.doesNotMatch(lone, /● echo x/);
+		const answer = withText("Just an answer.", true);
+		s.labels.recordEnd((answer as any).lastMessage, (answer as any).lastMessage.timestamp + 4_000);
+		const answerOnly = screen(chatOf(answer));
+		assert.match(answerOnly, /▸ thought 2s[\s\S]*Just an answer\./);
+		assert.doesNotMatch(answerOnly, /● thought/);
+	} finally { s.done(); }
+});
+
+test("the run in progress folds too, and the line keeps counting as work arrives", () => {
+	const s = setup();
+	try {
+		const thinking = thinkingOnly();
+		s.grouping.beginRun();
+		s.grouping.messageStart((thinking as any).lastMessage.timestamp);
+		const running = new ToolExecutionComponent("bash", "running", { command: "echo running" }, { outputPad: 0 }, {
+			renderShell: "self", renderCall: () => ({ render: () => ["● echo running"], invalidate() {} }),
+		} as any, { requestRender() {} } as any, "/tmp");
+		s.grouping.toolStart("running");
+		const chat = chatOf(tool("old"), withText("earlier answer"), thinking, tool("a"), running);
+		const live = screen(chat);
+		assert.match(live, /▸ (Worked for \d+s · )?1 tool call · echo[\s\S]*earlier answer[\s\S]*▸ Working for \d+s · 2 tool calls · thought · echo ×2/);
+		assert.doesNotMatch(live, /● (echo|thought)/, "no separate rows while it works");
+		chat.addChild(tool("b"));
+		assert.match(screen(chat), /▸ Working for \d+s · 3 tool calls/);
+	} finally { s.done(); }
+});
+
+test("Ctrl+O does not open folded lines; it only shows output inside one you opened", () => {
+	const s = setup();
+	try {
+		const a = tool("a"), b = tool("b");
+		const chat = chatOf(a, b);
+		a.setExpanded(true); b.setExpanded(true);
+		assert.equal(chat.render(100).length, 1);
+		assert.match(headerOf(chat), /^▸ 2 tool calls/);
+	} finally { s.done(); }
+});
+
+test("a run's thinking, tool calls and notes fold into one 'Worked for' line; only the answer stays", () => {
+	const s = setup();
+	try {
+		const base = 1_900_000_000_000;
+		const t1 = thinkingOnly(base), t2 = thinkingOnly(base + 6_000);
+		s.labels.recordEnd((t1 as any).lastMessage, base + 5_000);
+		s.labels.recordEnd((t2 as any).lastMessage, base + 13_000);
+		const n = note("Found the cause, fixing it.", base + 14_000);
+		s.labels.recordEnd((n as any).lastMessage, base + 15_000);
+		const answer = withText("All done.", false, base + 20_000);
+		s.labels.recordEnd((answer as any).lastMessage, base + 72_000);
+		const chat = chatOf(t1, tool("a"), t2, tool("b"), n, tool("c"), answer);
+		const text = screen(chat);
+		assert.equal(headerOf(chat), "▸ Worked for 1m 12s · 3 tool calls · thought 12s · echo ×3");
+		assert.doesNotMatch(text, /Found the cause/, "notes fold away with the work");
+		assert.match(text, /All done\./);
+		assert.equal(chat.render(100).filter((line) => /[▸▾]/.test(strip(line))).length, 1, "one line for the whole run");
+	} finally { s.done(); }
+});
+
+test("opened, the run is a quiet timeline: every row faint, behind a rail", () => {
+	const s = setup();
+	const tui = new TuiAltScreen(mouseTerminal());
+	try {
+		const chat = chatOf(thinkingOnly(), tool("a"), note("Checking the config."), tool("b"), withText("Answer."));
+		tui.addChild(chat);
+		(tui as any).beforeTerminalStart();
+		tui.renderNow();
+		const y = tui.getScreenLines().findIndex((line) => line.includes("tool calls"));
+		for (const suffix of ["M", "m"]) (tui as any).handleViewportInput(`\x1b[<0;5;${y + 1}${suffix}`);
+		tui.renderNow();
+		const lines = chat.render(100);
+		const header = lines.findIndex((line) => strip(line).includes("▾"));
+		const answerAt = lines.findIndex((line) => strip(line).includes("Answer."));
+		const inside = lines.slice(header + 1, answerAt).filter((line) => strip(line).trim() && !strip(line).includes("Answer"));
+		assert.ok(inside.some((line) => strip(line).includes("Checking the config.")), "notes are back");
+		for (const line of inside.filter((l) => strip(l).trim() !== "│")) {
+			assert.match(strip(line), /^│ /, `rail: ${strip(line)}`);
+			assert.ok(line.includes(FAINT), `faint: ${strip(line)}`);
+		}
+		assert.ok(!lines[answerAt]!.includes(FAINT), "the answer is not dimmed");
+		for (const line of lines) assert.ok(visibleWidth(line) <= 100);
+	} finally {
+		tui.stop({ preserveScreen: true });
+		s.done();
+	}
+});
+
+test("while the run is going the line counts up: 'Working for'", () => {
+	const s = setup();
+	try {
+		const started = Date.now() - 65_000;
+		const t = thinkingOnly(started);
+		s.grouping.beginRun();
+		s.grouping.messageStart(started);
+		const chat = chatOf(t, tool("a"));
+		assert.match(headerOf(chat), /^▸ Working for 1m 0[5-6]s · 1 tool call/);
+		s.grouping.settle();
+	} finally { s.done(); }
+});
+
+test("a reply that only thought before answering still reads 'thought Ns'", () => {
+	const s = setup();
+	try {
+		const answer = withText("Short answer.", true, 1_950_000_000_000);
+		s.labels.recordEnd((answer as any).lastMessage, 1_950_000_000_000 + 4_000);
+		assert.match(screen(chatOf(answer)), /▸ thought 2s\n[\s\S]*Short answer\./);
 	} finally { s.done(); }
 });

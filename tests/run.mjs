@@ -12,6 +12,10 @@ const suites = {
   actions: "../extensions/actions/tests/actions.test.mjs",
   "ask-user": "../extensions/ask-user/tests/ask-user.test.ts",
   "working-verbs": "../extensions/working-verbs/tests/activity.test.ts",
+  context: "../extensions/context/tests/context.test.ts",
+  checkpoints: "../extensions/checkpoints/tests/checkpoints.test.ts",
+  "edit-check": "../extensions/edit-check/tests/edit-check.test.ts",
+  subagent: "../extensions/subagent/tests/hub.test.ts",
   "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };

@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner with a random verb and what the agent is doing), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user, notifications (background alerts), actions (searchable command palette)
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner with a random verb and what the agent is doing), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user, notifications (background alerts), actions (searchable command palette), checkpoints (/rewind files and chat), edit-check (tell the agent about errors its edits cause), context (/context breakdown)
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -62,7 +62,23 @@ The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `a
 
 `compact-tools` shows an operation and its observed result on one compact row. Recognized test commands show reported pass/fail counts; Git commands show commit/push details; read, edit, write, and search calls summarize recognizable results. Unknown or complex shell commands keep their original command preview rather than getting a guessed label. Click a tool row or use `Ctrl+O` to see the full command and output.
 
-When a run finishes, each stretch of **thinking and tool calls folds into one line**, e.g. `▸ 14 tool calls (1 failed) · thought 42s · Tests 232 passed 0 failed · rg ×2 · Read ×3`. The line counts the calls (failures in red), adds up the thinking time, then lists recognised results and what ran: the program for shell commands (plumbing like `cd`, `cat` and `head` is skipped), the tool name otherwise. The thinking at the top of the answer that follows folds into it too. Notes the agent writes between tool calls stay visible, each stretch around them getting its own line; a single row on its own is left alone. While the agent works, everything stays live and folds when it settles. Click the line (`▾`) to open the rows in order, compact; `Ctrl+O` still shows tool output and opens folded lines. `/toolgroups off` shows every row again. A hidden-thinking row reads `● thinking…` while the model thinks, then `● thought 14s` once the reply is done: the reply's time, split by its share of thinking tokens (just `● thought` when that split is unknown). Click it to read the thinking. Mouse clicks need fullscreen mode.
+Each run of **work folds into one line above the answer**, e.g. `▸ Worked for 4m 10s · 14 tool calls (1 failed) · thought 42s · Tests 232 passed 0 failed · rg ×2 · Read ×3`. The work is everything before the answer: thinking, tool calls, and the notes the agent writes along the way ("Now the README:"). Only the answer stays at full brightness. The line gives the run's time (from the first reply to the end of the answer), counts the calls (failures in red), adds up the thinking time, then lists recognised results and what ran: the program for shell commands (plumbing like `cd`, `cat` and `head` is skipped), the tool name otherwise. While the agent works it reads `Working for 1m 04s` and keeps counting; the working line above the input says what is happening now. A reply that only thought before answering reads `▸ thought 2s`. Click the line (`▾`) to open the run as a faint timeline behind a rail, in order, notes included; inside it `Ctrl+O` shows tool output, but it never opens a line. `/toolgroups off` shows every row again. A hidden-thinking row reads `● thinking…` while the model thinks, then `● thought 14s` once the reply is done: the reply's time, split by its share of thinking tokens (just `● thought` when that split is unknown). Click it to read the thinking. Mouse clicks need fullscreen mode.
+
+## Rewind
+
+Before and after every agent run, `checkpoints` snapshots the project's files into a separate git store under `~/.pi/agent/checkpoints` (your repo, index and stash are never touched; `.gitignore` is respected). `/rewind` lists your prompts, newest first, with how many files rewinding to each would restore. Pick one and the files the agent changed from that prompt on go back to how they were before it, then the chat rewinds to that prompt with its text in the editor ("Restore files only" leaves the chat alone). Only files the agent's runs changed are restored, so your own edits elsewhere stay; if you also edited one of those files afterwards, the confirmation says so. `/rewind` offers "Undo the last rewind" until Pi restarts. It needs the project to be in a git repository and covers changes made by any tool, including shell commands.
+
+## Errors after edits
+
+When the agent edits or writes a file, `edit-check` checks it and adds any new errors to the tool result, so the agent fixes them in the same turn. Errors that were already there are not listed. TypeScript uses the project's own `tsc` (nearest `tsconfig.json`, `node_modules/.bin/tsc`, incremental, run in the background so Pi stays responsive); Python uses `ruff` from the project's `.venv` or `PATH`; `.json` files are parsed. Other files, and projects without those tools, are not checked. `/checks off` turns it off.
+
+## Context
+
+`/context` shows what fills the context window: a stacked bar and a legend for the system prompt, project instructions (AGENTS.md), the skills list, tool definitions, your messages, the agent's text and tool calls, tool results and summaries, plus free space, then the biggest single items (`read src/big.ts`, `bash npm test`). Pi only knows the total, so each part is estimated from its text and fitted to it; earlier thinking is not resent, so it is not counted.
+
+## Subagent hub
+
+`/agents` or `Ctrl+Shift+A` lists the subagents this Pi has run: running ones first with what each is doing now (`Running npm test`), then recent finished ones with time, tokens and cost. Enter opens a live transcript (↑↓ and PgUp/PgDn scroll); `x` stops the selected subagent. A stopped subagent returns "Stopped by the user" to the agent while its parallel siblings keep going.
 
 ## Background notifications
 
@@ -234,7 +250,7 @@ Tests use Node's test runner and the packages from Pi's managed installation; no
 - `/verbs on|off`: spinner with a random verb, the run time and what the agent is doing
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block
 - `/bullets on|off`: operation/result tool summaries instead of boxed blocks (`Ctrl+O` expands original commands and output)
-- `/toolgroups on|off`: fold finished thinking and tool calls into one clickable line
+- `/toolgroups on|off`: fold each run's thinking, tool calls and notes into one "Worked for" line above the answer
 - `/notify on|off|status`: focus-aware background notifications
 - `/actions`: searchable command palette (`Ctrl+Shift+K`); `/actions restore` recovers a replaced draft
 - `/attachments`: draft image inspection/removal (`Ctrl+Shift+I` keeps the current draft)
@@ -244,3 +260,7 @@ Tests use Node's test runner and the packages from Pi's managed installation; no
 - `/latex on|off`: LaTeX image rendering
 - `/sessions`: switch project sessions
 - `/compact`: compact manually (auto-compaction is off)
+- `/rewind`: put back the files the agent changed since one of your prompts and rewind the chat
+- `/checks on|off`: report new errors after the agent's edits
+- `/context`: what fills the context window
+- `/agents`: subagent hub (`Ctrl+Shift+A`)

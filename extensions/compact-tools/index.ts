@@ -11,9 +11,9 @@
  * Hidden thinking blocks get the same bullet style and say how long they took ("● thought 14s");
  * click one, or Ctrl+T, to read the thinking.
  *
- * When a run finishes, each stretch of thinking and tool calls folds into one clickable line:
- *   ▸ 14 tool calls (1 failed) · thought 42s · Tests 232 passed · rg ×2
- * Notes the agent writes between them stay visible.
+ * Each run's work (thinking, tool calls, and notes written along the way) folds into one clickable
+ * line above the answer, live too:
+ *   ▸ Worked for 4m 10s · 14 tool calls (1 failed) · thought 42s · Tests 232 passed · rg ×2
  *
  * Toggle: /bullets [on|off]. Folding: /toolgroups [on|off].
  */
@@ -238,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("toolgroups", {
-		description: "Fold finished thinking and tool calls into one line: on | off",
+		description: "Fold each run's thinking, tool calls and notes into one line: on | off",
 		handler: async (args, ctx) => {
 			const value = args.trim().toLowerCase();
 			groupsEnabled = value === "on" ? true : value === "off" ? false : !groupsEnabled;
