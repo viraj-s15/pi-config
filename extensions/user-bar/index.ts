@@ -8,10 +8,12 @@
  * userMessageBg, and puts the bar in front of every row of the message (wrapped rows included).
  * Sent messages over 500 characters get two preview rows plus a clickable Show more row.
  * This is display-only: the original text and Markdown children stay intact.
+ * Clicking a message's text opens: copy, edit and resend (like /tree), fork from here (like /fork).
  * Toggles: /userbar [on|off] for the accent, /userfold [on|off] for folding.
  */
 
-import { type ExtensionAPI, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, type ExtensionAPI, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { findUserEntry, runMessageAction, runMessageMenu } from "./actions.ts";
 import { type TuiMouseEvent, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const BAR = "\x1b[38;2;120;169;255m▎\x1b[39m "; // oxocarbon blue
@@ -32,6 +34,7 @@ interface Shared {
 	ui?: { theme: { bg(name: string, text: string): string; fg(name: string, text: string): string } }; // live theme proxy
 	original: (width: number) => string[];
 	originalMouse?: (event: TuiMouseEvent) => ReturnType<UserMessageComponent["handleMouse"]>;
+	onClick?: (text: string) => void; // opens the message menu; set per session
 }
 
 const proto = UserMessageComponent.prototype;
@@ -100,9 +103,12 @@ proto.render = function (this: UserMessageComponent, width: number): string[] {
 	let last = -1;
 	for (let i = clean.length - 1; i >= 0; i--) if (hasText(clean[i]!)) { last = i; break; }
 	return clean.map((l, i) => {
-		if (i < first || i > last) return "  " + l;
+		// Prompt markers (OSC 133) must stay first on the row: Pi's Ctrl+Shift+Up/Down looks for them there.
+		const marker = /^(?:\x1b\]133;[ABC]\x07)+/.exec(l)?.[0] ?? "";
+		const rest = l.slice(marker.length);
+		if (i < first || i > last) return marker + "  " + rest;
 		// bold is re-applied per row; "\x1b[22m" at the end keeps it from leaking into the next line
-		return BAR + (BOLD ? `\x1b[1m${l}\x1b[22m` : l);
+		return marker + BAR + (BOLD ? `\x1b[1m${rest}\x1b[22m` : rest);
 	});
 };
 
@@ -119,14 +125,42 @@ proto.handleMouse = function (this: UserMessageComponent, event: TuiMouseEvent) 
 				width: event.width, height: event.height,
 			} }; // request a layout/render without stealing editor focus
 		}
+		const text = (this as unknown as { text?: string }).text;
+		const row = this.render(event.width)[event.y];
+		if (shared.onClick && typeof text === "string" && row !== undefined && hasText(row)) {
+			shared.onClick(text);
+			return { handled: true as const, target: {
+				component: this, originX: event.screenX - event.x, originY: event.screenY - event.y,
+				width: event.width, height: event.height,
+			} };
+		}
 	}
 	return shared.originalMouse?.call(this, event);
 };
 
 export default function (pi: ExtensionAPI) {
+	let menuOpen = false;
 	pi.on("session_start", (_e, ctx) => {
 		if (!ctx.hasUI) return;
 		shared.ui = ctx.ui as Shared["ui"];
+		shared.onClick = (text) => {
+			if (menuOpen) return;
+			menuOpen = true;
+			runMessageMenu(text, {
+				findEntry: (t) => findUserEntry(ctx.sessionManager.getBranch(), t),
+				select: (title, options) => ctx.ui.select(title, options),
+				copy: (t) => copyToClipboard(t),
+				run: (command) => pi.sendUserMessage(command, { expandPromptTemplates: true }),
+				notify: (message, level) => ctx.ui.notify(message, level),
+			})
+				.catch((error) => ctx.ui.notify(`Message menu failed: ${error instanceof Error ? error.message : String(error)}`, "error"))
+				.finally(() => { menuOpen = false; });
+		};
+	});
+
+	pi.registerCommand("message-action", {
+		description: "Edit or fork from one of your messages (used by clicking a sent message)",
+		handler: (args, ctx) => runMessageAction(args, ctx),
 	});
 
 	pi.registerCommand("userfold", {

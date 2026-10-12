@@ -11,6 +11,7 @@ const suites = {
   notifications: "../extensions/notifications/tests/notifications.test.ts",
   actions: "../extensions/actions/tests/actions.test.mjs",
   "ask-user": "../extensions/ask-user/tests/ask-user.test.ts",
+  "working-verbs": "../extensions/working-verbs/tests/activity.test.ts",
   "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };

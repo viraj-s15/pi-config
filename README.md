@@ -42,7 +42,7 @@ ln -sf "$REPO/models.json" ~/.pi/agent/models.json
 cp -n "$REPO/settings.json" ~/.pi/agent/settings.json
 ```
 
-- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user, notifications (background alerts), actions (searchable command palette)
+- `extensions/`: oxo-ui (input box and footer), working-verbs (spinner with a random verb and what the agent is doing), compact-tools (one-line tool bullets), user-bar (blue bar and collapsible sent messages), btw (side questions), image-paste (attach pasted images), paste-fold (collapse big pastes, click to expand), todos, todo-widget, subagent, usage, latex-images, searxng, sessions, ask-user, notifications (background alerts), actions (searchable command palette)
 - `skills/`: all skills in the repo
 - `prompts/`: prompt templates (empty for now)
 - `bin/`: helper scripts, e.g. `start-search-runtime` for local web search
@@ -62,7 +62,7 @@ The `oxo-ui` footer shows the directory and git status, cache hit rate, cost, `a
 
 `compact-tools` shows an operation and its observed result on one compact row. Recognized test commands show reported pass/fail counts; Git commands show commit/push details; read, edit, write, and search calls summarize recognizable results. Unknown or complex shell commands keep their original command preview rather than getting a guessed label. Click a tool row or use `Ctrl+O` to see the full command and output.
 
-After the agent settles, **adjacent successful tool calls** collapse into a clickable group, e.g. `▸ 4 tools · Tests 228 passed 0 failed · rg ×2 · sed`. The header lists recognised results first, then what ran: the program for shell commands (plumbing like `cd`, `cat` and `head` is skipped), the tool name otherwise. Thinking rows between the calls fold in with them. A hidden-thinking row reads `● thinking…` while the model thinks, then `● thought 14s` once the reply is done: the reply's time, split by its share of thinking tokens (just `● thought` when that split is unknown). Click it to read the thinking. Clicking expands it (`▾`) to the original tool rows and output. Calls from the current run stay visible while it works; failed and running calls never get grouped. Groups do not cross assistant text, failures or user messages, so the transcript's order stays intact. `/toolgroups off` restores individual rows; `/toolgroups on` enables grouping. `Ctrl+O` still reaches the original tools, including grouped ones. Mouse toggles need fullscreen mode.
+When a run finishes, each stretch of **thinking and tool calls folds into one line**, e.g. `▸ 14 tool calls (1 failed) · thought 42s · Tests 232 passed 0 failed · rg ×2 · Read ×3`. The line counts the calls (failures in red), adds up the thinking time, then lists recognised results and what ran: the program for shell commands (plumbing like `cd`, `cat` and `head` is skipped), the tool name otherwise. The thinking at the top of the answer that follows folds into it too. Notes the agent writes between tool calls stay visible, each stretch around them getting its own line; a single row on its own is left alone. While the agent works, everything stays live and folds when it settles. Click the line (`▾`) to open the rows in order, compact; `Ctrl+O` still shows tool output and opens folded lines. `/toolgroups off` shows every row again. A hidden-thinking row reads `● thinking…` while the model thinks, then `● thought 14s` once the reply is done: the reply's time, split by its share of thinking tokens (just `● thought` when that split is unknown). Click it to read the thinking. Mouse clicks need fullscreen mode.
 
 ## Background notifications
 
@@ -95,6 +95,20 @@ Pi folds a large paste into a marker such as `[paste #1 2314 chars]` and still s
 - Only the display changes. The saved message, Markdown content, attachments, and text sent to the model remain intact. Assistant replies are untouched.
 - Mouse toggles need fullscreen mode. `/userfold off` shows all user messages in full without a mouse; `/userfold on` restores folding.
 - Expansion is per rendered message, not saved to disk. A transcript rebuild (such as `/reload` or switching sessions) starts the new message components collapsed again.
+
+### Your messages: click and jump
+
+Left-click the text of any message you sent to get a menu:
+
+- **Copy text** copies it to the clipboard.
+- **Edit and resend** goes back to just before that message and puts it in the editor, like picking it in `/tree`. The later conversation stays in the session tree.
+- **Fork into a new session** starts a new session file from just before it, with the message in the editor, like `/fork`.
+
+Edit and fork wait until the agent is idle. **Ctrl+Shift+↑ / ↓** jumps the transcript to the previous or next message (yours and the agent's final answers); this is Pi's own key, which the blue bar used to break.
+
+### Working line
+
+While the agent runs, the line above the input keeps the Claude Code style random verb and adds what is happening right now: `✻ Flibbertigibbeting… (1m 04s) · Running npm test`. Other steps read `Thinking`, `Reading src/a.ts`, `Searching for "TODO"`, `Preparing an edit`, `Writing the answer`, `Running 3 tools` or `Waiting for the model`. The verb changes with every model turn; the time is the whole run's.
 
 ## Image paste
 
@@ -212,17 +226,15 @@ node tests/run.mjs usage   # Codex login refresh tests only
 
 Tests use Node's test runner and the packages from Pi's managed installation; no additional install is needed. Set `PI_MANAGED_INSTALL_ROOT` if Pi is installed somewhere other than `~/.pi/agent/install`.
 
-The footer tests include a synthetic OpenAI Responses event sequence passed through Pi's actual adapter. This checks normalization and token accounting without a paid request; it is not a live-provider speed benchmark.
-
 ## Commands
 
 - `/reload`: reload extensions after editing them
 - `/btw <question>`: answer a side question with the current model and chat context, without adding it to chat history (no tools; works while the agent is busy). Bare `/btw` reopens the last answer. [Controls and details](extensions/btw/README.md).
 - `/oxo`: toggle the custom input box and footer
-- `/verbs on|off`: Claude Code style spinner with random verbs
+- `/verbs on|off`: spinner with a random verb, the run time and what the agent is doing
 - `/userbar on|off`: bold text with a blue left bar on your sent messages instead of a grey block
 - `/bullets on|off`: operation/result tool summaries instead of boxed blocks (`Ctrl+O` expands original commands and output)
-- `/toolgroups on|off`: expandable groups of adjacent successful tools after the agent settles
+- `/toolgroups on|off`: fold finished thinking and tool calls into one clickable line
 - `/notify on|off|status`: focus-aware background notifications
 - `/actions`: searchable command palette (`Ctrl+Shift+K`); `/actions restore` recovers a replaced draft
 - `/attachments`: draft image inspection/removal (`Ctrl+Shift+I` keeps the current draft)

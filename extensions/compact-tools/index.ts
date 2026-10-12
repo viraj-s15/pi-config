@@ -11,7 +11,11 @@
  * Hidden thinking blocks get the same bullet style and say how long they took ("● thought 14s");
  * click one, or Ctrl+T, to read the thinking.
  *
- * Toggle: /bullets [on|off]. Group completed successes with /toolgroups [on|off].
+ * When a run finishes, each stretch of thinking and tool calls folds into one clickable line:
+ *   ▸ 14 tool calls (1 failed) · thought 42s · Tests 232 passed · rg ×2
+ * Notes the agent writes between them stay visible.
+ *
+ * Toggle: /bullets [on|off]. Folding: /toolgroups [on|off].
  */
 
 import { homedir } from "node:os";
@@ -221,6 +225,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", () => grouping?.beginRun());
 	pi.on("tool_execution_start", (event) => grouping?.toolStart(event.toolCallId));
 	pi.on("agent_settled", () => grouping?.settle());
+	pi.on("message_start", (event) => {
+		const message = event.message as { role: string; timestamp?: number };
+		if (message.role === "assistant" && typeof message.timestamp === "number") grouping?.messageStart(message.timestamp);
+	});
 	pi.on("message_end", (event) => {
 		if (event.message.role === "assistant") thinkingLabels.recordEnd(event.message);
 	});
@@ -230,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("toolgroups", {
-		description: "Group completed successful tool rows: on | off",
+		description: "Fold finished thinking and tool calls into one line: on | off",
 		handler: async (args, ctx) => {
 			const value = args.trim().toLowerCase();
 			groupsEnabled = value === "on" ? true : value === "off" ? false : !groupsEnabled;

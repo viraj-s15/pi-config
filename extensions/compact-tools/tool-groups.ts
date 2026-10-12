@@ -1,6 +1,7 @@
 import { Container, MouseRegion, Spacer, truncateToWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { commandProgram } from "./summaries.ts";
+import { foldThinking, thinkingOf, thinkingRealMessage, unfoldAllThinking } from "./thinking-label.ts";
 
 // v2 holds the state of this version. The unversioned key belonged to earlier versions of this file:
 // the first only tracked parents and never patched render, the second patched render with a closure
@@ -22,12 +23,16 @@ interface ToolExecutionRuntimeAdapter {
 }
 
 interface AssistantRuntimeAdapter {
-	lastMessage?: { content?: Array<{ type: string; text?: string }>; stopReason?: string };
+	lastMessage?: { content?: Array<{ type: string; text?: string; thinking?: string }>; stopReason?: string; timestamp?: number };
 }
 
 interface GroupingState {
 	enabled: boolean;
 	activeToolCallIds: Set<string>;
+	/** Assistant replies of the run in progress (by message timestamp): their stretch stays live. */
+	activeMessages?: Set<number>;
+	/** Lines opened or closed by a click, keyed by the stretch's first row. */
+	opened?: WeakMap<object, boolean>;
 	requestRender?: () => void;
 	/** The untouched Container.prototype.render underneath our wrapper. */
 	original: Container["render"];
@@ -46,6 +51,7 @@ const titleOf = (tool: string) => TITLES[tool] ?? tool.replace(/[_-]+/g, " ").re
 
 const fg = (rgb: [number, number, number], text: string) => `\x1b[38;2;${rgb.join(";")}m${text}\x1b[39m`;
 const OK: [number, number, number] = [0x42, 0xbe, 0x65];
+const ERR: [number, number, number] = [0xfa, 0x4d, 0x56];
 const TEXT: [number, number, number] = [0xdd, 0xe1, 0xe6];
 const DIM: [number, number, number] = [0x8d, 0x91, 0x99];
 
@@ -77,39 +83,64 @@ function describeTools(tools: ToolExecutionComponent[]): string {
 	return [...highlights, ...[...counts].map(([title, count]) => (count > 1 ? `${title} ×${count}` : title))].join(" · ");
 }
 
-/** A display-only view; the chat Container always retains its original children. */
+/** "thought 42s" over every thinking row of the stretch, or just "thought" when no time is known. */
+function describeThinking(rows: object[]): string {
+	let has = false;
+	let ms = 0;
+	let known = false;
+	for (const row of rows) {
+		const thinking = thinkingOf(row);
+		if (!thinking.has) continue;
+		has = true;
+		if (thinking.ms !== undefined) { ms += thinking.ms; known = true; }
+	}
+	if (!has) return "";
+	if (!known) return "thought";
+	const seconds = Math.max(1, Math.round(ms / 1000));
+	return `thought ${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`}`;
+}
+
+/**
+ * One line standing in for a finished stretch of work: tool calls, thinking rows, and the thinking at
+ * the top of the answer that follows (`answer`). Display-only; the chat keeps its real children.
+ */
 export class ToolGroupComponent extends Container {
 	private readonly items: Component[];
 	private readonly tools: ToolExecutionComponent[];
 	private readonly header: MouseRegion;
 
-	/** `items` are the tool rows plus the thinking rows and spacers between them, in their original order. */
-	constructor(items: Component[]) {
+	constructor(items: Component[], private readonly state: GroupingState, private readonly answer?: Component) {
 		super();
 		this.items = items;
 		this.tools = items.filter((item): item is ToolExecutionComponent => item instanceof ToolExecutionComponent);
 		this.header = new MouseRegion(
 			new HeaderLine(() => {
+				const count = this.tools.length;
+				const failed = this.tools.filter((tool) => runtimeOf(tool).result?.isError === true).length;
+				const parts: string[] = [];
+				const thought = describeThinking([...this.items.filter((item) => item instanceof AssistantMessageComponent), ...(this.answer ? [this.answer] : [])]);
+				if (thought) parts.push(thought);
 				const what = describeTools(this.tools);
-				// Failures always split groups, so "successful" goes without saying; the arrow says it opens.
-				return ` ${fg(OK, this.expanded ? "▾" : "▸")} ${fg(TEXT, `${this.tools.length} tools`)}${what ? fg(DIM, ` · ${what}`) : ""}`;
+				if (what) parts.push(what);
+				let line = ` ${fg(OK, this.expanded ? "▾" : "▸")}`;
+				if (count) line += ` ${fg(TEXT, `${count} tool call${count === 1 ? "" : "s"}`)}`;
+				if (failed) line += ` ${fg(ERR, `(${failed} failed)`)}`;
+				if (parts.length) line += fg(DIM, `${count ? " · " : " "}${parts.join(" · ")}`);
+				return line;
 			}),
 			(event: TuiMouseEvent) => {
 				if (event.type !== "click" || event.button !== "left") return undefined;
-				this.setExpanded(!this.expanded);
+				this.state.opened!.set(this.items[0]!, !this.expanded);
+				const ui = this.tools[0] ? runtimeOf(this.tools[0]).ui : undefined;
+				ui?.requestRender?.call(ui);
 				return { handled: true, render: true };
 			},
 		);
 	}
 
-	private get expanded(): boolean {
-		return this.tools.some((row) => runtimeOf(row).expanded);
-	}
-
-	setExpanded(expanded: boolean): void {
-		for (const row of this.tools) row.setExpanded(expanded);
-		const ui = runtimeOf(this.tools[0]!).ui;
-		ui?.requestRender?.call(ui);
+	/** Open if clicked open, or (until clicked) if Ctrl+O expanded its tools. */
+	get expanded(): boolean {
+		return this.state.opened!.get(this.items[0]!) ?? this.tools.some((row) => runtimeOf(row).expanded);
 	}
 
 	render(width: number): string[] {
@@ -149,51 +180,77 @@ export class ToolGroupComponent extends Container {
 	}
 }
 
-function isCompletedSuccess(component: Component, state: GroupingState): component is ToolExecutionComponent {
-	if (!(component instanceof ToolExecutionComponent)) return false;
-	const runtime = runtimeOf(component);
-	const ui = runtime.ui;
+function captureRender(component: ToolExecutionComponent, state: GroupingState): void {
+	const ui = runtimeOf(component).ui;
 	const requestRender = ui?.requestRender;
 	if (requestRender) state.requestRender = () => requestRender.call(ui);
-	return !runtime.isPartial && runtime.result?.isError === false && !state.activeToolCallIds.has(runtime.toolCallId);
 }
 
-/** Rows that carry no message of their own: spacing, and assistant turns that only thought or called tools. */
-function isTransparent(component: Component): boolean {
-	if (component instanceof Spacer) return true;
-	if (!(component instanceof AssistantMessageComponent)) return false;
-	const message = (component as unknown as AssistantRuntimeAdapter).lastMessage;
+const assistantMessage = (component: Component) =>
+	component instanceof AssistantMessageComponent ? (component as unknown as AssistantRuntimeAdapter).lastMessage : undefined;
+const hasText = (message: AssistantRuntimeAdapter["lastMessage"]) =>
+	!!message?.content?.some((block) => block.type === "text" && String(block.text ?? "").trim());
+
+/** Work: tool rows, assistant replies that only thought or called tools, and spacing between them. */
+function isWork(component: Component): boolean {
+	if (component instanceof ToolExecutionComponent || component instanceof Spacer) return true;
+	const message = assistantMessage(component);
 	if (!message || !Array.isArray(message.content)) return false;
-	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
-	return !message.content.some((block) => block.type === "text" && String(block.text ?? "").trim());
+	if (message.stopReason === "error" || message.stopReason === "aborted") return false; // keep the error in view
+	return !hasText(message);
+}
+
+/** Still happening: a running tool, or anything from the run in progress. */
+function isLive(component: Component, state: GroupingState): boolean {
+	if (component instanceof ToolExecutionComponent) {
+		const runtime = runtimeOf(component);
+		return runtime.isPartial || !runtime.result || state.activeToolCallIds.has(runtime.toolCallId);
+	}
+	const timestamp = assistantMessage(component)?.timestamp;
+	return timestamp !== undefined && !!state.activeMessages?.has(timestamp);
+}
+
+/** An answer whose first content is thinking: that thinking row can fold into the line above it. */
+function thinkingAnswer(component: Component | undefined, state: GroupingState): Component | undefined {
+	if (!component || isLive(component, state)) return undefined;
+	const content = (thinkingRealMessage(component) ?? assistantMessage(component))?.content;
+	if (!content || !hasText({ content })) return undefined;
+	const first = content.find((block) => (block.type === "text" && String(block.text ?? "").trim()) || block.type === "thinking");
+	return first?.type === "thinking" ? component : undefined;
 }
 
 function projectGroups(children: Component[], state: GroupingState): Component[] {
 	const projected: Component[] = [];
-	let floor = 0; // children before this index already belong to an earlier group
+	const answers = new Set<Component>(); // answers whose thinking is folded into a line this render
+	for (const child of children) if (child instanceof ToolExecutionComponent) captureRender(child, state);
 	for (let i = 0; i < children.length;) {
-		if (!isCompletedSuccess(children[i]!, state)) {
+		if (!isWork(children[i]!)) {
 			projected.push(children[i++]!);
 			continue;
 		}
-		// Extend the run over thinking rows and spacers, but only ever end it on a tool row.
-		let last = i;
-		let tools = 1;
-		for (let k = i + 1; k < children.length; k++) {
-			const child = children[k]!;
-			if (isCompletedSuccess(child, state)) { last = k; tools++; }
-			else if (!isTransparent(child)) break;
-		}
-		if (tools < 2) {
-			projected.push(children[i++]!);
-			continue;
-		}
-		// A thinking row or spacer just above the first tool belongs to the same stretch of work.
+		let end = i;
+		while (end < children.length && isWork(children[end]!)) end++;
+		// Spacing at either edge stays outside the line.
 		let first = i;
-		while (first > floor && isTransparent(children[first - 1]!)) first--;
-		projected.length -= i - first;
-		projected.push(new ToolGroupComponent(children.slice(first, last + 1)));
-		i = floor = last + 1;
+		while (first < end && children[first] instanceof Spacer) projected.push(children[first++]!);
+		let last = end;
+		while (last > first && children[last - 1] instanceof Spacer) last--;
+		const items = children.slice(first, last);
+		const rows = items.filter((item) => !(item instanceof Spacer));
+		const answer = thinkingAnswer(children[end], state);
+		const live = items.some((item) => isLive(item, state));
+		if (!live && rows.length > 0 && rows.length + (answer ? 1 : 0) >= 2) {
+			const group = new ToolGroupComponent(items, state, answer);
+			if (answer && !group.expanded) answers.add(answer);
+			projected.push(group);
+		} else {
+			projected.push(...items);
+		}
+		projected.push(...children.slice(last, end));
+		i = end;
+	}
+	for (const child of children) {
+		if (child instanceof AssistantMessageComponent) foldThinking(child, answers.has(child));
 	}
 	return projected;
 }
@@ -206,6 +263,7 @@ function projectGroups(children: Component[], state: GroupingState): Component[]
 export function installToolGrouping(): {
 	setEnabled(enabled: boolean): void;
 	beginRun(): void;
+	messageStart(timestamp: number): void;
 	toolStart(toolCallId: string): void;
 	settle(): void;
 	reset(): void;
@@ -227,8 +285,10 @@ export function installToolGrouping(): {
 		prototype[GROUPING] = state;
 	}
 	const current = state;
+	current.activeMessages ??= new Set();
+	current.opened ??= new WeakMap();
 	current.render = function (this: Container, width: number) {
-		if (!current.enabled || !this.children.some((child) => isCompletedSuccess(child, current))) {
+		if (!current.enabled || !this.children.some((child) => child instanceof ToolExecutionComponent || isWork(child) && !(child instanceof Spacer))) {
 			return current.original.call(this, width);
 		}
 		const originalChildren = this.children;
@@ -248,15 +308,24 @@ export function installToolGrouping(): {
 	}
 
 	return {
-		setEnabled(enabled) { current.enabled = enabled; },
-		beginRun() { current.activeToolCallIds.clear(); },
+		setEnabled(enabled) {
+			current.enabled = enabled;
+			if (!enabled) unfoldAllThinking();
+		},
+		beginRun() {
+			current.activeToolCallIds.clear();
+			current.activeMessages!.clear();
+		},
+		messageStart(timestamp) { current.activeMessages!.add(timestamp); },
 		toolStart(toolCallId) { current.activeToolCallIds.add(toolCallId); },
 		settle() {
 			current.activeToolCallIds.clear();
+			current.activeMessages!.clear();
 			current.requestRender?.();
 		},
 		reset() {
 			current.activeToolCallIds.clear();
+			current.activeMessages!.clear();
 			current.requestRender?.();
 		},
 	};

@@ -180,6 +180,16 @@ test("OSC 133 prompt boundaries survive folding and expansion", async () => {
   }
 });
 
+test("the prompt marker stays at the very start of the first row, so Ctrl+Shift+Up/Down can find it", async () => {
+  await reset();
+  for (const text of ["short prompt", body]) {
+    const m = new UserMessageComponent(text);
+    const lines = m.render(70);
+    assert.ok(lines[0]!.startsWith("\x1b]133;A\x07"), `the bar must come after the marker: ${JSON.stringify(lines[0]!.slice(0, 24))}`);
+    assert.match(plain(lines.find(l => plain(l).trim())!), /^▎/, "and the bar is still drawn on the text rows");
+  }
+});
+
 test("folding works with the blue bar disabled too", async () => {
   await reset();
   await commands.get("userbar").handler("off", ctx);
@@ -212,4 +222,104 @@ test("reload does not stack wrappers or lose an existing component's expansion",
   assert.ok(content(m).every(s => s.indexOf("▎") === s.lastIndexOf("▎")));
   click(m, control(m));
   assert.equal(content(m).length, 3);
+});
+
+// ---- clicking a sent message opens copy / edit and resend / fork ----
+
+import { findUserEntry, runMessageMenu, runMessageAction } from "../actions.ts";
+
+const MENU = Symbol.for("pi-config.user-bar");
+test("a plain left click on your message text opens its menu; the fold control, padding, drags and right-clicks do not", async () => {
+  await reset();
+  const opened: string[] = [];
+  const shared = (globalThis as any)[MENU];
+  const previous = shared.onClick;
+  shared.onClick = (text: string) => opened.push(text);
+  try {
+    const short = new UserMessageComponent("fix the footer");
+    const textRow = rows(short).findIndex(r => r.includes("fix the footer"));
+    assert.ok(click(short, textRow)?.handled, "the click is taken");
+    assert.deepEqual(opened, ["fix the footer"]);
+    click(short, textRow, { button: "right" });
+    click(short, textRow, { type: "drag" });
+    click(short, textRow, { ctrl: true });
+    click(short, 0); // the blank padding row above the text
+    assert.equal(opened.length, 1);
+    const long = new UserMessageComponent(body);
+    click(long, control(long));
+    assert.equal(opened.length, 1, "Show more still just folds");
+    click(long, control(long) - 1);
+    assert.deepEqual(opened.at(-1), body);
+  } finally { shared.onClick = previous; }
+});
+
+const entry = (id: string, content: any, role = "user") => ({ type: "message", id, message: { role, content } });
+test("the clicked message is found on the current branch by its text, latest first", () => {
+  const branch = [
+    entry("u1", "same words"),
+    entry("a1", [{ type: "text", text: "same words" }], "assistant"),
+    entry("u2", [{ type: "text", text: "same " }, { type: "image" }, { type: "text", text: "words" }]),
+    { type: "custom", id: "c1" },
+  ];
+  assert.equal(findUserEntry(branch, "same words"), "u2");
+  assert.equal(findUserEntry(branch, "never sent"), undefined);
+});
+
+function menuDeps(choice: string | undefined, entryId: string | null = "u7") {
+  const calls: any[] = [];
+  return {
+    calls,
+    deps: {
+      findEntry: () => entryId ?? undefined,
+      select: async (title: string, options: string[]) => { calls.push(["select", title, options]); return choice; },
+      copy: async (text: string) => { calls.push(["copy", text]); },
+      run: (command: string) => calls.push(["run", command]),
+      notify: (message: string, level?: string) => calls.push(["notify", message, level]),
+    },
+  };
+}
+
+test("menu: copy, edit and resend, fork", async () => {
+  let m = menuDeps("Copy text");
+  await runMessageMenu("hello there", m.deps);
+  assert.deepEqual(m.calls[0], ["select", "Your message", ["Copy text", "Edit and resend", "Fork into a new session"]]);
+  assert.deepEqual(m.calls.slice(1), [["copy", "hello there"], ["notify", "Copied 11 characters", "info"]]);
+
+  m = menuDeps("Edit and resend");
+  await runMessageMenu("hello", m.deps);
+  assert.deepEqual(m.calls.at(-1), ["run", "/message-action edit u7"]);
+
+  m = menuDeps("Fork into a new session");
+  await runMessageMenu("hello", m.deps);
+  assert.deepEqual(m.calls.at(-1), ["run", "/message-action fork u7"]);
+
+  m = menuDeps(undefined);
+  await runMessageMenu("hello", m.deps);
+  assert.equal(m.calls.length, 1, "Esc does nothing");
+});
+
+test("a message that is not on the branch can still be copied, but not edited or forked", async () => {
+  const m = menuDeps("Copy text", null);
+  await runMessageMenu("hello", m.deps);
+  assert.deepEqual(m.calls[0], ["select", "Your message", ["Copy text"]]);
+});
+
+test("the action command edits or forks once the agent is idle", async () => {
+  const calls: any[] = [];
+  const ctx = (idle: boolean) => ({
+    isIdle: () => idle,
+    navigateTree: async (id: string) => { calls.push(["navigateTree", id]); return { cancelled: false }; },
+    fork: async (id: string) => { calls.push(["fork", id]); return { cancelled: false }; },
+    ui: { notify: (message: string, level: string) => calls.push(["notify", message, level]) },
+  }) as any;
+  await runMessageAction("edit u7", ctx(true));
+  await runMessageAction("fork u7", ctx(true));
+  assert.deepEqual(calls, [["navigateTree", "u7"], ["fork", "u7"]]);
+  calls.length = 0;
+  await runMessageAction("edit u7", ctx(false));
+  assert.deepEqual(calls, [["notify", "Wait for the agent to finish, then try again", "warning"]]);
+  calls.length = 0;
+  await runMessageAction("explode u7", ctx(true));
+  await runMessageAction("", ctx(true));
+  assert.equal(calls.filter(c => c[0] !== "notify").length, 0, "unknown actions do nothing");
 });

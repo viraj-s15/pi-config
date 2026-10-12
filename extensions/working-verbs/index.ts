@@ -1,13 +1,15 @@
 /**
  * working-verbs: Claude Code style working indicator.
  *
- *   ✻ Flibbertigibbeting… (14s)
+ *   ✻ Flibbertigibbeting… (1m 04s) · Running npm test
  *
  * A star spinner (· ✢ ✳ ✶ ✻ ✽ and back) plus a random verb, picked again for every model turn,
- * and an elapsed-seconds counter. Command: /verbs on|off
+ * the run's elapsed time, and what the agent is doing right now (activity.ts).
+ * Command: /verbs on|off
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createActivity, formatElapsed } from "./activity.ts";
 
 const VERBS = [
 	"Accomplishing", "Actioning", "Actualizing", "Baking", "Beaming", "Befuddling", "Billowing", "Blanching",
@@ -53,10 +55,13 @@ export default function (pi: ExtensionAPI) {
 	let verb = "";
 	let startedAt = 0;
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let activity = createActivity(process.cwd());
+	let ui: ExtensionContext["ui"] | undefined;
 
-	const message = () => {
-		const s = Math.floor((Date.now() - startedAt) / 1000);
-		return `${ROSE}${verb}…${FG_RESET} ${DIM}(${s}s)${FG_RESET}`;
+	const message = () =>
+		`${ROSE}${verb}…${FG_RESET} ${DIM}(${formatElapsed(Date.now() - startedAt)}) · ${activity.label()}${FG_RESET}`;
+	const show = () => {
+		if (timer) ui?.setWorkingMessage(message());
 	};
 
 	const apply = (ctx: ExtensionContext) => {
@@ -81,16 +86,41 @@ export default function (pi: ExtensionAPI) {
 		if (!enabled || !ctx.hasUI) return;
 		verb = pick();
 		startedAt = Date.now();
-		ctx.ui.setWorkingMessage(message());
+		ui = ctx.ui;
+		activity = createActivity(ctx.cwd);
+		activity.start();
 		if (timer) clearInterval(timer);
-		timer = setInterval(() => ctx.ui.setWorkingMessage(message()), 1000);
+		timer = setInterval(show, 1000);
+		show();
 	});
 
 	// new verb for every model turn (each tool round trip), like Claude Code
 	pi.on("message_start", (e, ctx) => {
 		if (!enabled || !ctx.hasUI || !timer || e.message.role !== "assistant") return;
 		verb = pick(verb);
-		ctx.ui.setWorkingMessage(message());
+		activity.replyStart();
+		show();
+	});
+
+	pi.on("message_update", (e) => {
+		if (!timer) return;
+		const event = e.assistantMessageEvent as { type: string; delta?: string; contentIndex?: number; partial?: { content?: Array<{ type: string; name?: string }> } };
+		const before = activity.label();
+		const block = event.contentIndex === undefined ? undefined : event.partial?.content?.[event.contentIndex];
+		activity.delta(event.type, event.delta ?? "", block?.type === "toolCall" ? block.name : undefined);
+		if (activity.label() !== before) show(); // a new step shows at once, not on the next tick
+	});
+
+	pi.on("tool_execution_start", (e) => {
+		if (!timer) return;
+		activity.toolStart(e.toolCallId, e.toolName, e.args);
+		show();
+	});
+
+	pi.on("tool_execution_end", (e) => {
+		if (!timer) return;
+		activity.toolEnd(e.toolCallId);
+		show();
 	});
 
 	pi.on("agent_end", (_e, ctx) => stop(ctx));

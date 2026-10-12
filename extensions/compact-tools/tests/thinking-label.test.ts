@@ -118,3 +118,56 @@ test("visible thinking is untouched: the label only replaces the hidden-thinking
 		assert.doesNotMatch(text, /thought/);
 	} finally { labels.setEnabled(false); }
 });
+
+import { foldThinking, thinkingOf, unfoldAllThinking } from "../thinking-label.ts";
+
+test("folding an answer's thinking hides it, survives Pi's own redraws, and unfolding brings it back", () => {
+	const labels = installThinkingLabels();
+	try {
+		labels.setEnabled(true);
+		const message = reply([THINK, TEXT], { output: 1000, reasoning: 500 }, START + 10);
+		labels.recordEnd(message, START + 10 + 8_000);
+		const component = new AssistantMessageComponent(message, true);
+		assert.equal(label(component), "● thought 4s");
+		foldThinking(component, true);
+		assert.equal(label(component), "", "no thinking row while folded");
+		assert.match(strip(component.render(80).join("\n")), /Here is the answer\./);
+		component.setHiddenThinkingLabel("anything"); // Pi redraws rows from their last message
+		component.invalidate();
+		assert.equal(label(component), "", "still folded after Pi redraws it");
+		assert.deepEqual(thinkingOf(component), { has: true, ms: 4_000 }, "the real message is still known");
+		foldThinking(component, false);
+		assert.equal(label(component), "● thought 4s");
+		foldThinking(component, true);
+		unfoldAllThinking();
+		assert.equal(label(component), "● thought 4s", "unfold-all restores every folded row");
+	} finally { labels.setEnabled(false); }
+});
+
+test("thinkingOf reports when a row has no thinking or no known time", () => {
+	const labels = installThinkingLabels();
+	try {
+		labels.setEnabled(true);
+		assert.deepEqual(thinkingOf(new AssistantMessageComponent(reply([TEXT], { output: 10 }, START + 11), true)), { has: false });
+		assert.deepEqual(thinkingOf(new AssistantMessageComponent(reply([THINK, CALL], { output: 10, reasoning: 5 }, START + 12), true)), { has: true });
+	} finally { labels.setEnabled(false); }
+});
+
+test("a wrapper left by the previous version is replaced on reload, so new behaviour takes effect", () => {
+	const KEY = Symbol.for("pi-config.compact-tools.thinking-label");
+	const proto = AssistantMessageComponent.prototype as any;
+	installThinkingLabels();
+	const real = proto[KEY].original;
+	const stale = function (this: any, m: any, s?: boolean) { return real.call(this, m, s); };
+	proto.updateContent = stale;
+	proto[KEY] = { enabled: true, ends: new Map(), original: real, wrapper: stale, label: () => undefined }; // no update hook
+	const labels = installThinkingLabels();
+	try {
+		assert.notEqual(proto.updateContent, stale);
+		assert.equal(proto[KEY].original, real, "wrapped around the real method, not the stale wrapper");
+		labels.setEnabled(true);
+		const message = reply([THINK], { output: 300 }, START + 13);
+		labels.recordEnd(message, START + 13 + 2_000);
+		assert.equal(label(new AssistantMessageComponent(message, true)), "● thought 2s");
+	} finally { labels.setEnabled(false); }
+});

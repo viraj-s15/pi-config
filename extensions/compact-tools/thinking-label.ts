@@ -24,9 +24,17 @@ interface Message {
 interface State {
 	enabled: boolean;
 	ends: Map<number, number>; // message.timestamp -> when the reply finished
+	/** Rows whose thinking is folded into a work line (see tool-groups.ts): drawn without thinking blocks. */
+	folded?: Set<object>;
+	/** The copy drawn while folded -> the real message, so Pi's own redraws (from lastMessage) stay right. */
+	realOf?: WeakMap<object, Message>;
+	/** Each row's real message, for the work line's "thought 42s". */
+	messageOf?: WeakMap<object, Message>;
 	original: (this: any, message: Message, isStreaming?: boolean) => void;
 	wrapper: (this: any, message: Message, isStreaming?: boolean) => void;
 	label: (message: Message, streaming: boolean) => string | undefined;
+	/** What the wrapper runs; replaced on every load so /reload takes effect. */
+	update: (this: any, message: Message, isStreaming?: boolean) => void;
 }
 
 function formatDuration(ms: number): string {
@@ -71,29 +79,46 @@ export function installThinkingLabels(): {
 } {
 	const proto = AssistantMessageComponent.prototype as any;
 	let state = proto[KEY] as State | undefined;
-	if (!state || proto.updateContent !== state.wrapper) {
+	// The installed wrapper only forwards to state.update, which every load replaces. A wrapper from an
+	// older version (no update hook) did the work itself: put the original back and wrap again.
+	if (state && !state.update && proto.updateContent === state.wrapper) proto.updateContent = state.original;
+	if (!state || !state.update || proto.updateContent !== state.wrapper) {
 		const previous = state;
-		state = {
+		const fresh: State = {
 			enabled: previous?.enabled ?? false,
 			ends: previous?.ends ?? new Map(),
 			original: proto.updateContent,
 			wrapper: undefined as never,
 			label: undefined as never,
+			update: undefined as never,
 		};
-		const current = state;
-		state.wrapper = function (this: any, message: Message, isStreaming?: boolean) {
-			const streaming = isStreaming ?? this.isStreaming ?? false;
-			if (current.enabled && message) {
-				const label = current.label(message, streaming);
-				if (label) this.hiddenThinkingLabel = label;
-			}
-			return current.original.call(this, message, isStreaming);
+		fresh.wrapper = function (this: any, message: Message, isStreaming?: boolean) {
+			return fresh.update.call(this, message, isStreaming);
 		};
-		proto.updateContent = state.wrapper;
-		proto[KEY] = state;
+		proto.updateContent = fresh.wrapper;
+		proto[KEY] = fresh;
+		state = fresh;
 	}
 	const current = state;
+	current.folded ??= new Set();
+	current.realOf ??= new WeakMap();
+	current.messageOf ??= new WeakMap();
 	current.label = labelFor(current.ends);
+	current.update = function (this: any, incoming: Message, isStreaming?: boolean) {
+		const message = (incoming && current.realOf!.get(incoming)) ?? incoming;
+		const streaming = isStreaming ?? this.isStreaming ?? false;
+		if (message) current.messageOf!.set(this, message);
+		if (current.enabled && message) {
+			const label = current.label(message, streaming);
+			if (label) this.hiddenThinkingLabel = label;
+		}
+		let shown = message;
+		if (message && current.folded!.has(this) && Array.isArray(message.content)) {
+			shown = { ...message, content: message.content.filter((block) => block.type !== "thinking") };
+			current.realOf!.set(shown, message);
+		}
+		return current.original.call(this, shown, isStreaming);
+	};
 
 	return {
 		setEnabled(enabled) { current.enabled = enabled; },
@@ -110,4 +135,36 @@ export function installThinkingLabels(): {
 			if (typeof message.timestamp === "number") current.ends.set(message.timestamp, now);
 		},
 	};
+}
+
+const stateOf = () => (AssistantMessageComponent.prototype as any)[KEY] as State | undefined;
+
+/** Hide (or show again) a row's thinking because it is part of a folded work line. */
+export function foldThinking(component: object, folded: boolean): void {
+	const state = stateOf();
+	if (!state?.folded || state.folded.has(component) === folded) return;
+	if (folded) state.folded.add(component);
+	else state.folded.delete(component);
+	const row = component as { lastMessage?: Message; updateContent?: (message: Message) => void };
+	if (row.lastMessage) row.updateContent?.(row.lastMessage);
+}
+
+export function unfoldAllThinking(): void {
+	const state = stateOf();
+	for (const component of [...(state?.folded ?? [])]) foldThinking(component, false);
+}
+
+/** Whether a row thought, and for how long if that is known. */
+export function thinkingOf(component: object): { has: boolean; ms?: number } {
+	const state = stateOf();
+	const message = state?.messageOf?.get(component) ?? (component as { lastMessage?: Message }).lastMessage;
+	const has = !!message?.content?.some((block) => block.type === "thinking");
+	if (!has || !state) return { has };
+	const ms = thinkingMs(message!, state.ends);
+	return ms === undefined ? { has } : { has, ms };
+}
+
+/** The message a row was really drawn from (with its thinking), even while its thinking is folded. */
+export function thinkingRealMessage(component: object): Message | undefined {
+	return stateOf()?.messageOf?.get(component);
 }
