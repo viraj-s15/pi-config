@@ -7,9 +7,10 @@ const suites = {
   "paste-fold": "../extensions/paste-fold/tests/paste-fold.test.ts",
   "user-bar": "../extensions/user-bar/tests/user-bar.test.ts",
   "image-paste": ["../extensions/image-paste/tests/attach.test.ts", "../extensions/image-paste/tests/clipboard.test.ts", "../extensions/image-paste/chips.test.mjs", "../extensions/image-paste/oxo-editor.test.mjs"],
-  "compact-tools": ["../extensions/compact-tools/tests/summaries.test.ts", "../extensions/compact-tools/tests/renderer.test.ts", "../extensions/compact-tools/tests/tool-groups.test.ts"],
+  "compact-tools": ["../extensions/compact-tools/tests/summaries.test.ts", "../extensions/compact-tools/tests/renderer.test.ts", "../extensions/compact-tools/tests/tool-groups.test.ts", "../extensions/compact-tools/tests/thinking-label.test.ts"],
   notifications: "../extensions/notifications/tests/notifications.test.ts",
   actions: "../extensions/actions/tests/actions.test.mjs",
+  "ask-user": "../extensions/ask-user/tests/ask-user.test.ts",
   "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };

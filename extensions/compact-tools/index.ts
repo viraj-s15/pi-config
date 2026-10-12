@@ -8,7 +8,8 @@
  *     ⎿ error text                         only shown when a tool fails
  *
  * Ctrl+O expands a row to the tool's normal output (diffs, full command output, subagent results).
- * Hidden thinking blocks get the same bullet style (toggle thinking with Ctrl+T).
+ * Hidden thinking blocks get the same bullet style and say how long they took ("● thought 14s");
+ * click one, or Ctrl+T, to read the thinking.
  *
  * Toggle: /bullets [on|off]. Group completed successes with /toolgroups [on|off].
  */
@@ -18,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { type Component, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { operationLabel, summarizeOperation } from "./summaries.ts";
 import { installToolGrouping } from "./tool-groups.ts";
+import { installThinkingLabels } from "./thinking-label.ts";
 
 const fg = (rgb: [number, number, number], s: string) => `\x1b[38;2;${rgb.join(";")}m${s}\x1b[39m`;
 const C = {
@@ -123,8 +125,10 @@ export default function (pi: ExtensionAPI) {
 	let groupsEnabled = true;
 	let grouping: ReturnType<typeof installToolGrouping> | undefined;
 
+	const thinkingLabels = installThinkingLabels();
 	const applyThinkingLabel = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
+		thinkingLabels.setEnabled(enabled);
 		ctx.ui.setHiddenThinkingLabel(enabled ? `${fg(C.thought, "●")} thinking…` : undefined);
 	};
 
@@ -209,14 +213,21 @@ export default function (pi: ExtensionAPI) {
 
 	grouping = installToolGrouping();
 	pi.on("session_start", (_e, ctx) => {
-		applyThinkingLabel(ctx);
+		thinkingLabels.indexSession(ctx.sessionManager.getEntries());
+		applyThinkingLabel(ctx); // also redraws every assistant row, so their labels pick up the times
 		grouping?.reset();
 		grouping?.setEnabled(groupsEnabled);
 	});
 	pi.on("agent_start", () => grouping?.beginRun());
 	pi.on("tool_execution_start", (event) => grouping?.toolStart(event.toolCallId));
 	pi.on("agent_settled", () => grouping?.settle());
-	pi.on("session_shutdown", () => grouping?.setEnabled(false));
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant") thinkingLabels.recordEnd(event.message);
+	});
+	pi.on("session_shutdown", () => {
+		grouping?.setEnabled(false);
+		thinkingLabels.setEnabled(false);
+	});
 
 	pi.registerCommand("toolgroups", {
 		description: "Group completed successful tool rows: on | off",

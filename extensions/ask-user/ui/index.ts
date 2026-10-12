@@ -1,5 +1,5 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Editor, type EditorTheme, Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Editor, type EditorTheme, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Question, Answer } from "../types.js";
 
 export interface QuestionResult {
@@ -89,6 +89,32 @@ async function showOptionsSelect(
       let optionIndex = 0;
       let editMode = false;
       let cachedLines: string[] | undefined;
+      // Multi-select: ticked options, and the typed "Other" answer that ticking Other asks for.
+      const multi = question.multiSelect === true;
+      const otherIndex = options.length - 1;
+      const checked = new Set<number>();
+      let customText: string | undefined;
+
+      const submitChecked = () => {
+        const values = [...checked].sort((a, b) => a - b)
+          .map((i) => (i === otherIndex ? customText : options[i].label))
+          .filter((value): value is string => !!value);
+        done({ value: values, selectedOption: values.join(", "), wasCustom: checked.has(otherIndex) && !!customText });
+      };
+
+      const toggle = (index: number) => {
+        optionIndex = index;
+        if (index !== otherIndex) {
+          if (checked.has(index)) checked.delete(index);
+          else checked.add(index);
+        } else if (checked.has(otherIndex)) {
+          checked.delete(otherIndex);
+          customText = undefined;
+        } else {
+          editMode = true; // ticking Other means typing it
+        }
+        refresh();
+      };
 
       const editorTheme: EditorTheme = {
         borderColor: (s) => theme.fg("accent", s),
@@ -104,7 +130,15 @@ async function showOptionsSelect(
       const editor = new Editor(tui, editorTheme);
       editor.onSubmit = (value) => {
         const trimmed = value.trim();
-        if (trimmed) {
+        if (multi) {
+          editMode = false;
+          editor.setText("");
+          if (trimmed) {
+            customText = trimmed;
+            checked.add(otherIndex);
+          }
+          refresh();
+        } else if (trimmed) {
           done({ value: trimmed, wasCustom: true });
         } else {
           editMode = false;
@@ -143,6 +177,16 @@ async function showOptionsSelect(
           return;
         }
 
+        if (multi && matchesKey(data, Key.space)) {
+          toggle(optionIndex);
+          return;
+        }
+
+        if (multi && matchesKey(data, Key.enter) && checked.size > 0) {
+          submitChecked();
+          return;
+        }
+
         if (matchesKey(data, Key.enter)) {
           const selected = options[optionIndex];
           if (selected.isOther) {
@@ -151,7 +195,7 @@ async function showOptionsSelect(
             return;
           }
           done({
-            value: selected.label,
+            value: multi ? [selected.label] : selected.label,
             selectedOption: selected.label,
             wasCustom: false,
           });
@@ -167,6 +211,10 @@ async function showOptionsSelect(
         if (data.length === 1 && data >= "0" && data <= "9") {
           const index = data === "0" ? options.length - 1 : Number(data) - 1;
           if (index >= 0 && index < options.length) {
+            if (multi) {
+              toggle(index);
+              return;
+            }
             optionIndex = index;
             const selected = options[optionIndex];
             if (selected.isOther) {
@@ -203,7 +251,9 @@ async function showOptionsSelect(
           const selected = i === optionIndex;
           const prefix = selected ? theme.fg("accent", "> ") : "  ";
           const color = selected ? "accent" : "text";
-          add(prefix + theme.fg(color, `${i + 1}. ${opt.label}`));
+          const box = multi ? (checked.has(i) ? theme.fg("accent", "[x] ") : "[ ] ") : "";
+          const label = multi && opt.isOther && customText ? `Other: ${customText}` : opt.label;
+          add(prefix + box + theme.fg(color, `${i + 1}. ${label}`));
           if (opt.description) {
             add(`     ${theme.fg("muted", opt.description)}`);
           }
@@ -221,7 +271,9 @@ async function showOptionsSelect(
         if (editMode) {
           add(theme.fg("dim", " Enter to submit • Esc to go back"));
         } else {
-          add(theme.fg("dim", " ↑↓ navigate • 1-9 select • Enter confirm • Esc cancel"));
+          add(theme.fg("dim", multi
+            ? ` ↑↓ navigate • Space or 1-9 toggle • Enter confirm${checked.size ? ` (${checked.size} selected)` : ""} • Esc cancel`
+            : " ↑↓ navigate • 1-9 select • Enter confirm • Esc cancel"));
         }
         add(theme.fg("accent", "─".repeat(width)));
 
