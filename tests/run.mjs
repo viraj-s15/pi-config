@@ -16,6 +16,7 @@ const suites = {
   checkpoints: "../extensions/checkpoints/tests/checkpoints.test.ts",
   "edit-check": "../extensions/edit-check/tests/edit-check.test.ts",
   subagent: "../extensions/subagent/tests/hub.test.ts",
+  todos: "../extensions/todos/tests/storage.test.ts",
   "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
   usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
 };

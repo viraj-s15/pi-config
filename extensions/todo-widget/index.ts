@@ -1,7 +1,7 @@
 /**
  * todo-widget: live todo progress above the input, styled to match oxo-ui.
  *
- * Reads the same files as the `todos` extension (<cwd>/.pi/todos/*.md, or $PI_TODO_PATH).
+ * Reads the same per-project global store as the `todos` extension (or $PI_TODO_PATH).
  *
  *   ✔  green pill        done        (status closed | done)
  *   ⠋  yellow pill       in progress (claimed by a session, or status in-progress/doing/working/wip)
@@ -15,9 +15,10 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getTodosDir } from "../todos/storage.ts";
 
 // ---------- palette (oxocarbon-grey + carbon yellow) ----------
 type RGB = [number, number, number];
@@ -81,13 +82,8 @@ function frontMatter(content: string): any {
 	return undefined;
 }
 
-function todosDir(cwd: string): string {
-	const o = process.env.PI_TODO_PATH?.trim();
-	return resolve(cwd, o || ".pi/todos");
-}
-
 export function readTodos(cwd: string, sessionStart: number): Item[] {
-	const dir = todosDir(cwd);
+	const dir = getTodosDir(cwd);
 	let files: string[];
 	try {
 		files = readdirSync(dir).filter((f) => f.endsWith(".md"));

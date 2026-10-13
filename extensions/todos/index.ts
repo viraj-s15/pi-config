@@ -1,9 +1,9 @@
 /**
- * This extension stores todo items as files under <todo-dir> (defaults to .pi/todos,
- * or the path in PI_TODO_PATH).  Each todo is a standalone markdown file named
+ * This extension stores todo items under ~/.pi/agent/todos/<project-name>-<path-hash>,
+ * or the path in PI_TODO_PATH.  Each todo is a standalone markdown file named
  * <id>.md and an optional <id>.lock file is used while a session is editing it.
  *
- * File format in .pi/todos:
+ * Each todo file has this format:
  * - The file starts with a JSON object (not YAML) containing the front matter:
  *   { id, title, tags, status, created_at, assigned_to_session }
  * - After the JSON block comes optional markdown body text separated by a blank line.
@@ -29,13 +29,14 @@
  * Use `/todos` to bring up the visual todo manager or just let the LLM use them
  * naturally.
  */
-import { DynamicBorder, copyToClipboard, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { DynamicBorder, copyToClipboard, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "@sinclair/typebox";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import crypto from "node:crypto";
+import { getTodosDir, migrateLegacyTodos } from "./storage.ts";
 import {
 	Container,
 	type Focusable,
@@ -52,10 +53,8 @@ import {
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
-const TODO_DIR_NAME = ".pi/todos";
-const TODO_PATH_ENV = "PI_TODO_PATH";
 const TODO_SETTINGS_NAME = "settings.json";
 const TODO_ID_PREFIX = "TODO-";
 const TODO_ID_PATTERN = /^[a-f0-9]{8}$/i;
@@ -704,29 +703,13 @@ class TodoDetailOverlayComponent {
 	}
 }
 
-function getTodosDir(cwd: string): string {
-	const overridePath = process.env[TODO_PATH_ENV];
-	if (overridePath && overridePath.trim()) {
-		return path.resolve(cwd, overridePath.trim());
-	}
-	return path.resolve(cwd, TODO_DIR_NAME);
-}
-
-function getTodosDirLabel(cwd: string): string {
-	const overridePath = process.env[TODO_PATH_ENV];
-	if (overridePath && overridePath.trim()) {
-		return path.resolve(cwd, overridePath.trim());
-	}
-	return TODO_DIR_NAME;
-}
-
 function getTodoSettingsPath(todosDir: string): string {
 	return path.join(todosDir, TODO_SETTINGS_NAME);
 }
 
 function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	const gc = raw.gc ?? DEFAULT_TODO_SETTINGS.gc;
-	const gcDays = Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
+	const gcDays = typeof raw.gcDays === "number" && Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
 	return {
 		gc: Boolean(gc),
 		gcDays: Math.max(0, Math.floor(gcDays)),
@@ -962,7 +945,7 @@ async function acquireLock(
 				session,
 				created_at: new Date(now).toISOString(),
 			};
-			await handle.writeFile(JSON.stringify(info, null, 2), { encoding: "utf8", mode: 0o600 });
+			await handle.writeFile(JSON.stringify(info, null, 2), { encoding: "utf8" });
 			await handle.close();
 			return async () => {
 				try {
@@ -1417,12 +1400,13 @@ async function deleteTodo(
 export default function todosExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const todosDir = getTodosDir(ctx.cwd);
+		await migrateLegacyTodos(ctx.cwd);
 		await ensureTodosDir(todosDir);
 		const settings = await readTodoSettings(todosDir);
 		await garbageCollectTodos(todosDir, settings);
 	});
 
-	const todosDirLabel = getTodosDirLabel(process.cwd());
+	const todosDirLabel = getTodosDir(process.cwd());
 
 	pi.registerTool({
 		name: "todo",
@@ -1750,7 +1734,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 				return new Text(text, 0, 0);
 			}
 
-			if (!details.todo) {
+			if (!("todo" in details) || !details.todo) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "", 0, 0);
 			}
@@ -1783,7 +1767,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("todos", {
-		description: "List todos from .pi/todos",
+		description: "List todos from this project's todo store",
 		getArgumentCompletions: (argumentPrefix: string) => {
 			const todos = listTodosSync(getTodosDir(process.cwd()));
 			if (!todos.length) return null;
@@ -2067,7 +2051,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			if (nextPrompt) {
 				ctx.ui.setEditorText(nextPrompt);
-				rootTui?.requestRender();
+				(rootTui as TUI | null)?.requestRender();
 			}
 		},
 	});
