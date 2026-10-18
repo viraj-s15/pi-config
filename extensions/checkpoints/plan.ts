@@ -1,6 +1,8 @@
 /** What a rewind restores, worked out from the recorded runs. */
 
 export interface RunRecord {
+	/** Display-only diff data; custom entries never enter model context. */
+	diff?: import("./diff-view.ts").DiffReport;
 	/** The user message that started the run. */
 	entryId: string;
 	/** First line of that message, for the picker. */

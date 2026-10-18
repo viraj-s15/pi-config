@@ -42,7 +42,7 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 | [actions](extensions/actions) | Search commands, skills, and prompts with `/actions` or `Ctrl+Shift+K`. |
 | [ask-user](extensions/ask-user) | Let the agent ask questions with selectable answers. |
 | [btw](extensions/btw) | Ask a side question with `/btw` without changing the main chat. |
-| [checkpoints](extensions/checkpoints) | Undo agent changes in Git repos with `/rewind`; later manual edits may be overwritten. |
+| [checkpoints](extensions/checkpoints) | Expand per-turn diffs, inspect net session changes with `/diff`, or undo changes with `/rewind`; later manual edits may be overwritten. |
 | [compact-tools](extensions/compact-tools) | Fold thinking and tool calls while keeping all regular text visible. |
 | [context](extensions/context) | Show a context-usage breakdown with `/context`. |
 | [edit-check](extensions/edit-check) | Report new TypeScript, Python, and JSON errors after edits when checkers are available. |
@@ -67,6 +67,7 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 - Defaults: OpenAI `gpt-6.1-sol`, high effort, `oxocarbon-grey`, and manual compaction. See `settings.json` and `models.json`.
 - Todos live in `~/.pi/agent/todos/<project-name>-<path-hash>/`, outside your repo. Git subdirectories share one store. `PI_TODO_PATH` overrides it; old `.pi/todos/` files are copied once and left as backups.
 - `/reload` loads extension changes. Restart Pi after changes to shared runtime or prototype wrappers.
+- Changed turns get a collapsed **Changes** row. Click to expand, then click a filename to show its patch; `Ctrl+O` also expands entries. `/diff` opens a read-only net session diff, and `/diff last` shows the latest completed turn (including an empty diff for a no-change turn). In the panel: arrows or `j`/`k` scroll, `n`/`p` or Tab/Shift-Tab select a file, Enter toggles its patch, `a` toggles all, and Esc closes. Snapshots respect `.gitignore`, include new/deleted and binary files, and persist across resume/reload. Initial dirty work is the baseline, not attributed to the agent. Changes made concurrently by you or external processes cannot be distinguished from the agent's changes; session diffs cover only paths changed during recorded turns. Very large patches have explicit display limits. Regular terminal mode uses `/diff last` as the keyboard alternative to clicking.
 - Images and screenshots stay in chat context and are resent on later turns.
 
 ## Optional setup

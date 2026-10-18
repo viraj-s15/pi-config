@@ -8,8 +8,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describeRewind, filesToRestore, type RunRecord } from "./plan.ts";
 import { openStore, type SnapshotStore } from "./store.ts";
+import { showDiff, TurnDiffComponent } from "./diff-view.ts";
 
 const ENTRY = "checkpoint";
+const BASELINE = "checkpoint-baseline";
+const EMPTY_TURN = "checkpoint-empty-turn";
 const BOTH = "Restore files and rewind the chat";
 const FILES_ONLY = "Restore files only";
 
@@ -22,18 +25,33 @@ function list(files: string[], max = 4): string {
 
 export default function (pi: ExtensionAPI) {
 	let store: Promise<SnapshotStore | undefined> | undefined;
-	let pending: { before: string; at: number } | undefined;
+	let pending: { before: string; at: number; entryId?: string; prompt?: string } | undefined;
 	let undo: { tree: string; files: string[] } | undefined;
 	const storeFor = (cwd: string) => (store ??= openStore(cwd).catch(() => undefined));
 
 	const runsOf = (ctx: ExtensionContext): RunRecord[] =>
 		ctx.sessionManager.getBranch().flatMap((entry: any) => (entry.type === "custom" && entry.customType === ENTRY && entry.data ? [entry.data as RunRecord] : []));
 
-	pi.on("session_start", (_event, ctx) => {
+	// Custom entries are rendered in the transcript but never sent to the model.
+	pi.registerEntryRenderer<RunRecord>(ENTRY, (entry, options, theme) =>
+		entry.data?.diff ? new TurnDiffComponent(entry.data.diff, theme, options.expanded) : undefined);
+
+	const baselineOf = (ctx: ExtensionContext): string | undefined => {
+		const entries = ctx.sessionManager.getBranch();
+		const baseline = entries.find((entry: any) => entry.type === "custom" && entry.customType === BASELINE) as any;
+		return baseline?.data?.tree ?? runsOf(ctx)[0]?.before;
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
 		store = undefined;
 		pending = undefined;
 		undo = undefined;
-		void storeFor(ctx.cwd);
+		try {
+			const s = await storeFor(ctx.cwd);
+			if (s && !baselineOf(ctx)) pi.appendEntry(BASELINE, { tree: await s.snapshot() });
+		} catch {
+			// Retry a missing baseline before the first run; never block the session.
+		}
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
@@ -41,7 +59,11 @@ export default function (pi: ExtensionAPI) {
 		const s = await storeFor(ctx.cwd);
 		if (!s) return;
 		try {
-			pending = { before: await s.snapshot(), at: Date.now() };
+			const prompt = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) => entry.type === "message" && entry.message?.role === "user") as any;
+			const at = Date.now();
+			const before = await s.snapshot();
+			if (!baselineOf(ctx)) pi.appendEntry(BASELINE, { tree: before });
+			pending = { before, at, entryId: prompt?.id, prompt: prompt ? textOf(prompt.message.content) : undefined };
 		} catch {
 			pending = undefined;
 		}
@@ -56,13 +78,50 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const after = await s.snapshot();
 			const files = await s.changed(run.before, after);
-			if (!files.length) return;
-			const prompt = ctx.sessionManager.getBranch().find((entry: any) => entry.type === "message" && entry.message?.role === "user" && entry.message.timestamp >= run.at) as any;
-			if (!prompt) return;
-			pi.appendEntry<RunRecord>(ENTRY, { entryId: prompt.id, prompt: textOf(prompt.message.content), before: run.before, after, files, at: run.at });
+			if (!files.length) {
+				pi.appendEntry(EMPTY_TURN, { before: run.before, after, files: [], at: run.at });
+				return;
+			}
+			// The user message normally precedes before_agent_start. Capture its ID there,
+			// rather than relying on millisecond timestamps after an expensive snapshot.
+			const prompt = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) => entry.type === "message" && entry.message?.role === "user") as any;
+			const entryId = run.entryId ?? prompt?.id;
+			if (!entryId) return;
+			// Preserve rewind even when generating a display patch fails.
+			const diff = await s.diff(run.before, after).catch(() => undefined);
+			pi.appendEntry<RunRecord>(ENTRY, { entryId, prompt: run.prompt ?? textOf(prompt.message.content), before: run.before, after, files, at: run.at, diff });
 		} catch {
 			// A failed snapshot only means this run cannot be rewound.
 		}
+	});
+
+	pi.registerCommand("diff", {
+		description: "View net session changes, or /diff last for the latest turn (read-only)",
+		handler: async (args, ctx) => {
+			if (!ctx.hasUI) return;
+			if (!ctx.isIdle()) return ctx.ui.notify("Wait for the agent to finish first.", "warning");
+			const mode = args.trim().toLowerCase();
+			if (mode && mode !== "last") return ctx.ui.notify("Usage: /diff or /diff last", "info");
+			const s = await storeFor(ctx.cwd);
+			if (!s) return ctx.ui.notify("Diffs need a Git repository.", "warning");
+			const runs = runsOf(ctx);
+			const lastEntry = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) => entry.type === "custom" && (entry.customType === ENTRY || entry.customType === EMPTY_TURN)) as any;
+			const last = lastEntry?.data as RunRecord | undefined;
+			if (!last) return ctx.ui.notify("No recorded turns yet. Diffs start with the first turn after checkpoints is loaded.", "info");
+			try {
+				const from = mode === "last" ? last.before : baselineOf(ctx);
+				if (!from) return ctx.ui.notify("No session baseline is available.", "warning");
+				// Limit session diffs to paths changed during recorded turns. Unrelated
+				// edits between turns are not shown as agent work. Overlapping edits
+				// cannot be attributed: this is a filesystem diff, not authorship proof.
+				const report = mode === "last"
+					? await s.diff(from, last.after)
+					: await s.diff(from, await s.snapshot(), [...new Set(runs.flatMap((run) => run.files))]);
+				await showDiff(ctx, report, mode === "last" ? "Last turn · read-only" : "Session net changes · recorded paths · read-only");
+			} catch {
+				ctx.ui.notify("Could not read these diff snapshots. They may no longer be available.", "warning");
+			}
+		},
 	});
 
 	pi.registerCommand("rewind", {

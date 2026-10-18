@@ -13,7 +13,7 @@ const suites = {
   "ask-user": "../extensions/ask-user/tests/ask-user.test.ts",
   "working-verbs": "../extensions/working-verbs/tests/activity.test.ts",
   context: "../extensions/context/tests/context.test.ts",
-  checkpoints: "../extensions/checkpoints/tests/checkpoints.test.ts",
+  checkpoints: ["../extensions/checkpoints/tests/checkpoints.test.ts", "../extensions/checkpoints/tests/diff.test.ts", "../extensions/checkpoints/tests/diff-view.test.ts", "../extensions/checkpoints/tests/diff-host.test.ts"],
   "edit-check": "../extensions/edit-check/tests/edit-check.test.ts",
   subagent: "../extensions/subagent/tests/hub.test.ts",
   todos: "../extensions/todos/tests/storage.test.ts",

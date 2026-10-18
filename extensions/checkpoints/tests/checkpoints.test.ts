@@ -102,8 +102,8 @@ test("the picker shows each prompt with how long ago and how many files rewindin
 test("registers /rewind and the run hooks", () => {
 	const commands: string[] = [];
 	const events: string[] = [];
-	checkpoints({ registerCommand: (name: string) => commands.push(name), on: (event: string) => events.push(event), appendEntry() {} } as any);
-	assert.deepEqual(commands, ["rewind"]);
+	checkpoints({ registerCommand: (name: string) => commands.push(name), on: (event: string) => events.push(event), registerEntryRenderer() {}, appendEntry() {} } as any);
+	assert.deepEqual(commands, ["diff", "rewind"]);
 	for (const event of ["session_start", "before_agent_start", "agent_settled"]) assert.ok(events.includes(event), event);
 });
 
@@ -118,6 +118,7 @@ test("a run is recorded against its prompt, and /rewind restores the agent's fil
 		const pi = {
 			on: (event: string, fn: Function) => handlers.set(event, fn),
 			registerCommand: (name: string, spec: any) => commands.set(name, spec),
+			registerEntryRenderer() {},
 			appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", id: `c${entries.length}`, customType, data }),
 		};
 		checkpoints(pi as any);
@@ -136,9 +137,11 @@ test("a run is recorded against its prompt, and /rewind restores the agent's fil
 		p.write("a.ts", "agent wrote this\n");
 		p.write("made.ts", "new file\n");
 		await handlers.get("agent_settled")!({}, ctx);
-		assert.equal(entries.length, 2);
-		assert.deepEqual(entries[1].data.files, ["a.ts", "made.ts"]);
-		assert.equal(entries[1].data.entryId, "u1");
+		assert.equal(entries.length, 3);
+		const checkpoint = entries.find((entry) => entry.customType === "checkpoint");
+		assert.deepEqual(checkpoint.data.files, ["a.ts", "made.ts"]);
+		assert.equal(checkpoint.data.entryId, "u1");
+		assert.match(checkpoint.data.diff.files[0].patch, /\+agent wrote this/);
 
 		p.write("mine.ts", "my own edit\n"); // never touched by the agent
 		answers.push("just now · make a better", "Restore files and rewind");
