@@ -56,7 +56,7 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 | [subagent](extensions/subagent) | Run subagents; watch or stop them with `/agents` or `Ctrl+Shift+A`. |
 | [todo-widget](extensions/todo-widget) | Show live todo progress; expand it with `Ctrl+Shift+E`. |
 | [todos](extensions/todos) | Manage project tasks with `/todos` and the agent's `todo` tool. |
-| [usage](extensions/usage) | Show provider quotas and estimated API costs with `/usage`. |
+| [usage](extensions/usage) | Show quota bars, API-equivalent cost since each weekly reset, and 30-day spend with `/usage`; `d` toggles details. |
 | [user-bar](extensions/user-bar) | Style sent messages, fold long ones, and add copy/edit/fork actions. |
 | [working-verbs](extensions/working-verbs) | Show the agent's current activity above the input. |
 | [pi-anthropic-auth](https://www.npmjs.com/package/@gotgenes/pi-anthropic-auth) | Add Anthropic login support. |
@@ -71,6 +71,24 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 - Images and screenshots stay in chat context and are resent on later turns.
 
 ## Optional setup
+
+### Semble code search
+
+Install or update [Semble](https://github.com/MinishLab/semble) and its upstream Pi integration:
+
+```bash
+node "$REPO/bin/setup-semble.mjs"
+```
+
+Requires `uv` (`brew install uv` if needed). The command upgrades `semble[mcp]`, runs `semble install --agent pi --type mcp --yes`, then reapplies this config's Pi defaults. It updates the version pin, so rerun this same command for upgrades. Plain `semble install` alone rewrites its MCP entry and removes our extra settings.
+
+Pi 1.3.0 has native MCP support; no separate MCP or agents extension is needed. Setup adds `search` and `find_related` as direct tools in `~/.pi/agent/mcp.json`, and a managed preference section in `~/.pi/agent/AGENTS.md`, preserving other servers and instructions. Run `/reload`, then `/mcp` to inspect the connection.
+
+Each repo is indexed on its first search, not during setup. Later searches reuse the cache and incrementally update changed files. Defaults are five results with ten-line snippets, no indexing worker pool, single-thread numerical/tokenizer settings, a five-minute request timeout, and eviction of idle in-memory indexes after two minutes. These thread settings reduce CPU concurrency; they are not a hard OS CPU quota. Disk indexes remain cached. MCP freshness checks have a build-time cooldown, so use live reads or the documented CLI fallback when checking immediately changed code. `rg` remains available for exhaustive literal/reference searches. `find_related` is similarity search, not an exhaustive call graph.
+
+To remove Semble's MCP entry, run `semble uninstall --agent pi --type mcp --yes`. Remove the `pi-config:semble` marked section from `~/.pi/agent/AGENTS.md` separately if you no longer want the guidance.
+
+### Web search
 
 For web search, run a [SearXNG server](https://docs.searxng.org/admin/installation.html) with JSON results enabled. The default URL is `http://127.0.0.1:8888`; set `SEARXNG_URL` to change it. `bin/start-search-runtime` starts an existing Colima and `pi-searxng` container setup.
 

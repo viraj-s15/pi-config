@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { createTestLoader } from "./pi-runtime.mjs";
 
 const suites = {
+  semble: "./semble-setup.test.mjs",
   btw: "../extensions/btw/tests/btw.test.ts",
   "oxo-ui": "../extensions/oxo-ui/tests/rolling-tps.test.ts",
   "paste-fold": "../extensions/paste-fold/tests/paste-fold.test.ts",
@@ -18,7 +19,7 @@ const suites = {
   subagent: "../extensions/subagent/tests/hub.test.ts",
   todos: "../extensions/todos/tests/storage.test.ts",
   "todo-widget": "../extensions/todo-widget/tests/todo-widget.test.ts",
-  usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts"],
+  usage: ["../extensions/usage/tests/codex-auth.test.ts", "../extensions/usage/tests/spend.test.ts", "../extensions/usage/tests/cost-chart.test.ts", "../extensions/usage/tests/quota.test.ts", "../extensions/usage/tests/view.test.ts", "../extensions/usage/tests/layout.test.ts"],
 };
 const requested = process.argv.slice(2);
 const selected = requested.length ? requested : Object.keys(suites);

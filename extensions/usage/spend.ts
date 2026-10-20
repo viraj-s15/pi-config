@@ -6,6 +6,10 @@ const DAY_MS = 86_400_000;
 export interface SpendOptions {
 	dir: string;
 	days?: number;
+	/** Inclusive lower timestamp bound. When provided, files are not filtered by mtime. */
+	from?: number;
+	/** Exclusive upper timestamp bound. Future records are excluded even if this is later than now. */
+	to?: number;
 	now?: () => number;
 }
 
@@ -13,6 +17,8 @@ export interface Spend {
 	total: number;
 	messages: number;
 	days: number;
+	/** False when a directory or session file could not be read; zero must not imply complete accounting. */
+	complete?: boolean;
 	/** Cost per day, oldest first; the last entry is the most recent 24 hours. */
 	daily: number[];
 	byProvider: { provider: string; total: number; daily: number[]; models: { model: string; total: number }[] }[];
@@ -48,29 +54,32 @@ function parseLine(line: string): Charge | undefined {
 	return { key, at, cost, provider, model: String(message.model ?? "unknown") };
 }
 
-async function recordsOf(path: string, mtimeMs: number, size: number): Promise<Charge[]> {
+async function recordsOf(path: string, mtimeMs: number, size: number): Promise<Charge[] | undefined> {
 	const hit = cache.get(path);
 	if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.records;
 	let records: Charge[] = [];
 	try {
 		records = (await readFile(path, "utf8")).split("\n").flatMap((line) => parseLine(line) ?? []);
-	} catch {}
+	} catch { return undefined; }
 	cache.set(path, { mtimeMs, size, records });
 	return records;
 }
 
-/** API-equivalent cost of every assistant message in the last `days` days, across all saved sessions. */
-export async function readSpend({ dir, days = 30, now = Date.now }: SpendOptions): Promise<Spend> {
-	const cutoff = now() - days * DAY_MS;
+/** API-equivalent cost of assistant messages in the selected interval, across all saved sessions. */
+export async function readSpend({ dir, days = 30, from, to, now = Date.now }: SpendOptions): Promise<Spend> {
+	const currentTime = now();
+	const cutoff = from ?? currentTime - days * DAY_MS;
+	const upperBound = to;
 	let names: string[] = [];
+	let complete = true;
 	try {
 		names = (await readdir(dir, { recursive: true })).filter((n) => n.endsWith(".jsonl"));
-	} catch {}
+	} catch { complete = false; }
 
 	const seen = new Set<string>();
 	const providers = new Map<string, { models: Map<string, number>; daily: number[] }>();
 	const daily = new Array<number>(days).fill(0);
-	const end = now();
+	const end = currentTime;
 	let total = 0;
 	let messages = 0;
 	// Sorted so duplicates resolve the same way every time.
@@ -80,19 +89,23 @@ export async function readSpend({ dir, days = 30, now = Date.now }: SpendOptions
 		try {
 			info = await stat(path);
 		} catch {
+			complete = false;
 			continue;
 		}
-		if (info.mtimeMs < cutoff) continue; // untouched for the whole window
-		for (const r of await recordsOf(path, info.mtimeMs, info.size)) {
-			if (r.at <= cutoff || seen.has(r.key)) continue;
+		if (from === undefined && info.mtimeMs < cutoff) continue; // untouched for the whole window
+		const records = await recordsOf(path, info.mtimeMs, info.size);
+		if (!records) { complete = false; continue; }
+		for (const r of records) {
+			if ((from === undefined ? r.at <= cutoff : r.at < cutoff) || (upperBound !== undefined && r.at >= upperBound) || r.at > currentTime || seen.has(r.key)) continue;
 			seen.add(r.key);
 			total += r.cost;
 			messages++;
-			const daysAgo = Math.max(0, Math.floor((end - r.at) / DAY_MS));
-			daily[days - 1 - daysAgo]! += r.cost;
+			const daysAgo = Math.floor((end - r.at) / DAY_MS);
+			const dayIndex = days - 1 - daysAgo;
+			if (dayIndex >= 0 && dayIndex < days) daily[dayIndex]! += r.cost;
 			const entry = providers.get(r.provider) ?? { models: new Map<string, number>(), daily: new Array<number>(days).fill(0) };
 			entry.models.set(r.model, (entry.models.get(r.model) ?? 0) + r.cost);
-			entry.daily[days - 1 - daysAgo]! += r.cost;
+			if (dayIndex >= 0 && dayIndex < days) entry.daily[dayIndex]! += r.cost;
 			providers.set(r.provider, entry);
 		}
 	}
@@ -102,6 +115,7 @@ export async function readSpend({ dir, days = 30, now = Date.now }: SpendOptions
 		total,
 		messages,
 		days,
+		complete,
 		daily,
 		byProvider: [...providers]
 			.map(([provider, { models, daily: providerDaily }]) => ({

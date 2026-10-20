@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { readSpend } from "../spend.ts";
+import { readWeeklyCost, sumProviderSpend, weeklySpendRange, WEEK_SECONDS } from "../weekly-spend.ts";
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 9, 10, 12, 0, 0);
@@ -137,11 +138,69 @@ test("daily totals: one bucket per day, oldest first, today last", async t => {
   assert.equal(daily.reduce((a, b) => a + b, 0), total);
 });
 
-test("a message stamped slightly in the future counts as today", async t => {
+test("a message stamped slightly in the future is excluded", async t => {
   const dir = sessions(t);
   write(dir, "a", "1.jsonl", [msg(1, { ago: -60_000 })]);
   const { daily } = await read(dir);
-  assert.equal(daily[29], 1);
+  assert.equal(daily[29], 0);
+});
+
+test("explicit spend bounds include from, exclude to and future records, and capture now once", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    msg(1, { ago: DAY }), msg(2, { ago: DAY - 1 }), msg(4), msg(8, { ago: -1000 }),
+  ]);
+  let clockCalls = 0;
+  const spend = await readSpend({ dir, from: NOW - DAY, to: NOW, now: () => { clockCalls++; return NOW; } });
+  assert.equal(spend.total, 3);
+  assert.equal(spend.messages, 2);
+  assert.equal(clockCalls, 1);
+});
+
+test("explicit from scans old-mtime files and supports inclusive exact timestamps", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [msg(2, { ago: 1000 }), msg(3, { ago: 2 * DAY })]);
+  const path = join(dir, "a", "1.jsonl");
+  utimesSync(path, new Date(NOW - 40 * DAY), new Date(NOW - 40 * DAY));
+  const spend = await readSpend({ dir, from: NOW - 2 * DAY, to: NOW, now: () => NOW });
+  assert.equal(spend.total, 5);
+  assert.equal(spend.messages, 2);
+});
+
+test("weekly range requires exact, live seven-day metadata and prefers the general bucket", () => {
+  const now = NOW;
+  const reset = now + 3 * DAY;
+  const range = weeklySpendRange({
+    anthropic: [
+      { label: "7d Opus", used: 50, resetsAt: reset, durationSeconds: WEEK_SECONDS },
+      { label: "7d", used: 20, resetsAt: reset, durationSeconds: WEEK_SECONDS },
+      { label: "5h", used: 10, resetsAt: reset, durationSeconds: 5 * 3600 },
+    ],
+  }, ["anthropic"], now);
+  assert.deepEqual(range, { from: reset - WEEK_SECONDS * 1000, to: reset });
+});
+
+test("weekly range rejects absent, expired, too-distant and non-seven-day windows", () => {
+  const now = NOW;
+  assert.equal(weeklySpendRange({ x: [{ label: "7d", used: 1, durationSeconds: WEEK_SECONDS }] }, ["x"], now), undefined);
+  assert.equal(weeklySpendRange({ x: [{ label: "7d", used: 1, resetsAt: now - 1, durationSeconds: WEEK_SECONDS }] }, ["x"], now), undefined);
+  assert.equal(weeklySpendRange({ x: [{ label: "7d", used: 1, resetsAt: now + 8 * DAY, durationSeconds: WEEK_SECONDS }] }, ["x"], now), undefined);
+  assert.equal(weeklySpendRange({ x: [{ label: "7d", used: 1, resetsAt: now + DAY }] }, ["x"], now), undefined);
+});
+
+test("weekly spend provider IDs accept Codex aliases without double counting", () => {
+  const spend = {
+    total: 9, messages: 2, days: 30, daily: [],
+    byProvider: [
+      { provider: "openai", total: 4, daily: [], models: [] },
+      { provider: "anthropic", total: 5, daily: [], models: [] },
+      { provider: "google", total: 7, daily: [], models: [] },
+    ],
+  };
+  assert.equal(sumProviderSpend(spend, ["openai", "openai-codex", "openai"]), 4);
+  assert.equal(sumProviderSpend(spend, ["anthropic"]), 5);
+  // Unattributed providers (for example Antigravity's separate groups) stay out.
+  assert.equal(sumProviderSpend(spend, []), 0);
 });
 
 test("each provider carries its own daily series, summing to the overall daily", async t => {
@@ -158,4 +217,37 @@ test("each provider carries its own daily series, summing to the overall daily",
   assert.deepEqual([anthropic.daily[29], anthropic.daily[27]], [1, 5]);
   const summed = spend.daily.map((_, i) => spend.byProvider.reduce((a, p) => a + p.daily[i]!, 0));
   assert.deepEqual(summed, spend.daily);
+});
+
+test("weekly cost reads each subscription's own reset-aligned interval, including the exact start", async t => {
+  const dir = sessions(t);
+  const from = NOW - 4 * DAY;
+  const duplicate = msg(2, { ago: 4 * DAY, provider: "openai", responseId: "boundary" });
+  write(dir, "a", "1.jsonl", [duplicate, msg(100, { ago: 4 * DAY + 1 }), msg(3, { ago: DAY }), msg(9, { provider: "anthropic", ago: DAY })]);
+  write(dir, "b", "fork.jsonl", [duplicate]);
+  const result = await readWeeklyCost([{ label: "7d", used: 30, resetsAt: from + 7 * DAY, durationSeconds: WEEK_SECONDS }], ["openai", "openai-codex"], dir, NOW);
+  assert.deepEqual(result, { status: "ready", total: 5, from, to: from + 7 * DAY, asOf: NOW });
+  const other = await readWeeklyCost([{ label: "7d", used: 30, resetsAt: NOW + 6 * DAY, durationSeconds: WEEK_SECONDS }], ["anthropic"], dir, NOW);
+  assert.equal(other.status, "ready");
+  if (other.status === "ready") assert.equal(other.total, 9);
+});
+
+test("weekly windows reject expired general windows, boundary resets and ambiguous model group resets", () => {
+  const window = (label: string, resetsAt: number) => ({ label, resetsAt, used: 10, durationSeconds: WEEK_SECONDS });
+  for (const wins of [
+    [window("7d", NOW)],
+    [window("7d Opus", NOW + DAY)],
+    [window("7d", NOW + DAY), window("7d", NOW + 2 * DAY)],
+    [window("7d", NOW - 1), window("7d Opus", NOW + DAY)],
+    [window("Claude weekly", NOW + DAY), window("Gemini weekly", NOW + 2 * DAY)],
+  ]) assert.equal(weeklySpendRange({ x: wins }, ["x"], NOW), undefined);
+  assert.deepEqual(weeklySpendRange({ x: [window("Claude weekly", NOW + DAY), window("Gemini weekly", NOW + DAY)] }, ["x"], NOW), { from: NOW - 6 * DAY, to: NOW + DAY });
+});
+
+test("missing weekly metadata never reads history and unavailable history never becomes a zero-dollar week", async t => {
+  let calls = 0;
+  const missing = await readWeeklyCost([], ["openai"], "unused", NOW, async () => { calls++; throw Error("must not run"); });
+  assert.equal(missing.status, "unavailable"); assert.equal(calls, 0);
+  const noHistory = await readWeeklyCost([{ label: "7d", used: 0, resetsAt: NOW + DAY, durationSeconds: WEEK_SECONDS }], ["openai"], join(sessions(t), "missing"), NOW);
+  assert.equal(noHistory.status, "unavailable");
 });

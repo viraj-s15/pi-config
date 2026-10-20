@@ -9,7 +9,8 @@
  *
  * API cost   API-equivalent cost of the last 30 days, summed from saved sessions (see spend.ts)
  *
- * Keys in the overlay: r = refresh, esc / q / enter = close.
+ * Weekly costs follow each provider's real quota reset, not the calendar week.
+ * Keys: d = details, r = refresh, arrows / j / k = scroll, esc / q / enter = close.
  */
 
 import { execFile } from "node:child_process";
@@ -17,10 +18,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, ScrollView, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { withCodexCredentials } from "./codex-auth.ts";
 import { columnChart, costRows, stackedBar } from "./cost-chart.ts";
-import { readSpend } from "./spend.ts";
+import { readSpend, type Spend } from "./spend.ts";
+import { parseAnthropicUsage, parseCodexUsage, parseAntigravityUsage, type Win } from "./quota.ts";
+import { readWeeklyCost, type WeeklyCost } from "./weekly-spend.ts";
+import { fit, pair, usageColumns, windowLabel } from "./layout.ts";
 
 // ---------- palette (oxocarbon-grey) ----------
 type RGB = [number, number, number];
@@ -32,7 +36,6 @@ const C = {
 	rose: [0xff, 0x7e, 0xb6] as RGB,
 	orange: [0xff, 0x83, 0x2b] as RGB,
 	pink: [0xee, 0x53, 0x96] as RGB,
-	green: [0x42, 0xbe, 0x65] as RGB,
 	text: [0xdd, 0xe1, 0xe6] as RGB,
 	muted: [0x8d, 0x91, 0x99] as RGB,
 	subtle: [0x6e, 0x74, 0x7d] as RGB,
@@ -43,12 +46,6 @@ const fg = ([r, g, b]: RGB, s: string) => `\x1b[38;2;${r};${g};${b}m${s}${RESET}
 const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 
 // ---------- model ----------
-interface Win {
-	label: string;
-	used: number; // percent 0..100
-	resetsAt?: number; // epoch ms
-	note?: string;
-}
 interface CostProvider {
 	name: string;
 	color: RGB;
@@ -64,12 +61,13 @@ interface CostView {
 	plansTotal: number;
 	providers: CostProvider[];
 }
-interface Section {
+export interface Section {
 	name: string;
 	plan?: string;
 	wins: Win[];
 	extra: string[]; // free-form lines
 	cost?: CostView; // drawn as bars by the renderer
+	weekly?: WeeklyCost;
 	error?: string;
 	loading: boolean;
 }
@@ -96,13 +94,7 @@ async function getJson(url: string, headers: Record<string, string>): Promise<an
 	return res.json();
 }
 
-const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const clampPct = (n: number) => Math.max(0, Math.min(100, n));
-const iso = (v: unknown): number | undefined => {
-	if (typeof v !== "string") return undefined;
-	const t = Date.parse(v);
-	return Number.isNaN(t) ? undefined : t;
-};
 
 // ---------- fetchers ----------
 async function fetchAnthropic(): Promise<Partial<Section>> {
@@ -132,41 +124,7 @@ async function fetchAnthropic(): Promise<Partial<Section>> {
 	}
 	if (!d) throw lastErr;
 
-	const wins: Win[] = [];
-	const known: [string, string][] = [
-		["five_hour", "5h"],
-		["seven_day", "7d"],
-		["seven_day_opus", "7d Opus"],
-		["seven_day_sonnet", "7d Sonnet"],
-	];
-	for (const [key, label] of known) {
-		const w = d[key];
-		const u = num(w?.utilization);
-		if (u !== undefined) wins.push({ label, used: clampPct(u), resetsAt: iso(w.resets_at) });
-	}
-	// Any other bucket with a dollar cap (the API reports it under an opaque key): show as a spend cap.
-	for (const [key, w] of Object.entries<any>(d)) {
-		if (known.some(([k]) => k === key) || !w || typeof w !== "object") continue;
-		const limit = num(w.limit_dollars);
-		const used = num(w.used_dollars);
-		if (limit && used !== undefined) {
-			wins.push({
-				label: "Spend cap",
-				used: clampPct(num(w.utilization) ?? (used / limit) * 100),
-				resetsAt: iso(w.resets_at),
-				note: `$${used.toFixed(2)} / $${limit.toFixed(0)}`,
-			});
-		}
-	}
-	if (!wins.length) throw new UsageError("no quota windows returned");
-	return { wins };
-}
-
-function windowLabel(seconds: number | undefined, fallback: string): string {
-	if (!seconds) return fallback;
-	if (seconds % 86400 === 0) return `${seconds / 86400}d`;
-	if (seconds % 3600 === 0) return `${seconds / 3600}h`;
-	return fallback;
+	return parseAnthropicUsage(d);
 }
 
 async function fetchCodex(): Promise<Partial<Section>> {
@@ -182,30 +140,9 @@ async function fetchCodex(): Promise<Partial<Section>> {
 	} catch (e) {
 		throw e instanceof TokenRejected ? new UsageError("token rejected even after refreshing: run `codex login`") : e;
 	}
-	const d = usage.value;
-
-	const rl = d.rate_limit ?? {};
-	const wins: Win[] = [];
-	for (const [w, fb] of [
-		[rl.primary_window, "5h"],
-		[rl.secondary_window, "7d"],
-	] as const) {
-		const used = num(w?.used_percent);
-		if (used === undefined) continue;
-		const at = num(w.reset_at);
-		const after = num(w.reset_after_seconds);
-		wins.push({
-			label: windowLabel(num(w.limit_window_seconds), fb),
-			used: clampPct(used),
-			resetsAt: at ? at * 1000 : after !== undefined ? Date.now() + after * 1000 : undefined,
-		});
-	}
-	const extra: string[] = [];
-	const bal = d.credits?.balance;
-	if (d.credits?.has_credits && bal !== undefined) extra.push(`credits balance: ${bal}`);
-	if (usage.warning) extra.push(usage.warning);
-	if (!wins.length) throw new UsageError("no quota windows returned");
-	return { plan: typeof d.plan_type === "string" ? d.plan_type : undefined, wins, extra };
+	const parsed = parseCodexUsage(usage.value);
+	if (usage.warning) parsed.extra.push(usage.warning);
+	return parsed;
 }
 
 function run(cmd: string, args: string[], timeoutMs: number, cwd: string): Promise<string> {
@@ -248,20 +185,7 @@ async function fetchAntigravity(): Promise<Partial<Section>> {
 		const body = JSON.parse(out);
 		if (body.status !== "SUCCESS" || body.num_turns !== 0 || body.command?.name !== "usage") throw new UsageError("unexpected agy response");
 
-		const wins: Win[] = [];
-		for (const g of body.command.data?.groups ?? []) {
-			const words = String(g.name ?? "").split(/\s+/).filter(Boolean);
-			if (words.at(-1)?.toLowerCase() === "models") words.pop();
-			const group = words.join(" ").replace(" and ", "/");
-			for (const b of g.buckets ?? []) {
-				const rem = num(b.remaining_fraction);
-				if (rem === undefined) continue;
-				const win = b.window === "weekly" ? "7d" : (b.window ?? "");
-				wins.push({ label: `${group} ${win}`.trim(), used: clampPct((1 - rem) * 100), resetsAt: iso(b.reset_time) });
-			}
-		}
-		if (!wins.length) throw new UsageError("no quota windows returned");
-		return { wins };
+		return parseAntigravityUsage(body);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -278,9 +202,10 @@ const PLANS: { [provider: string]: number } = { openai: 20, anthropic: 20 };
 const COST_COLORS: { [provider: string]: RGB } = { openai: C.sky, anthropic: C.orange };
 const FALLBACK_COLORS: RGB[] = [C.purple, C.teal, C.rose, C.blue];
 
-async function fetchSpend(): Promise<Partial<Section>> {
-	const spend = await readSpend({ dir: join(PI_DIR, "sessions") });
+async function fetchSpend(history?: Promise<Spend>): Promise<Partial<Section>> {
+	const spend = await (history ?? readSpend({ dir: join(PI_DIR, "sessions") }));
 	const window = `last ${spend.days} days`;
+	if (spend.complete === false) throw new UsageError("session history could not be fully read");
 	if (!spend.messages) return { plan: window, extra: ["no spend recorded in saved sessions yet"] };
 	let fallback = 0;
 	const providers: CostProvider[] = costRows(spend.byProvider, PLANS).map((row) => {
@@ -301,9 +226,9 @@ async function fetchSpend(): Promise<Partial<Section>> {
 }
 
 // ---------- rendering ----------
-function fmtReset(at?: number): string {
+function fmtReset(at?: number, now = Date.now()): string {
 	if (!at) return "";
-	const s = Math.round((at - Date.now()) / 1000);
+	const s = Math.round((at - now) / 1000);
 	if (s <= 0) return "resetting…";
 	const d = Math.floor(s / 86400);
 	const h = Math.floor((s % 86400) / 3600);
@@ -320,147 +245,238 @@ function bar(pct: number, width: number, color: RGB = usageColor(pct)): string {
 	return fg(color, "█".repeat(filled)) + fg(C.track, "█".repeat(width - filled));
 }
 
-class UsageView {
-	sections: Section[];
-	private reload: () => void;
-	private done: () => void;
-	constructor(sections: Section[], reload: () => void, done: () => void) {
-		this.sections = sections;
-		this.reload = reload;
-		this.done = done;
+export class UsageView {
+	private details = false;
+	private content: string[] = [];
+	private scroll: ScrollView;
+	constructor(
+		public sections: Section[], private reload: () => void, private done: () => void,
+		private requestRender: () => void = () => {}, private maxHeight: () => number = () => 40,
+	) {
+		this.scroll = new ScrollView({ render: () => this.content, invalidate() {} }, { scrollbar: "hidden", follow: "none" });
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "return") || data === "q") this.done();
-		else if (data === "r") this.reload();
+		if (matchesKey(data, "escape") || matchesKey(data, "return") || data === "q") { this.done(); return; }
+		if (data === "r") this.reload();
+		else if (data === "d") { this.details = !this.details; this.scroll.scrollToStart(); }
+		else if (matchesKey(data, "up") || data === "k") this.scroll.scrollBy(-1);
+		else if (matchesKey(data, "down") || data === "j") this.scroll.scrollBy(1);
+		else if (matchesKey(data, "pageUp")) this.scroll.scrollBy(-Math.max(1, this.scroll.viewportHeight - 1));
+		else if (matchesKey(data, "pageDown")) this.scroll.scrollBy(Math.max(1, this.scroll.viewportHeight - 1));
+		else if (matchesKey(data, "home")) this.scroll.scrollToStart();
+		else if (matchesKey(data, "end")) this.scroll.scrollToEnd();
+		else return;
+		this.requestRender();
 	}
 
-	invalidate(): void {}
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "wheel") return;
+		this.scroll.scrollBy(event.wheelDelta ?? 0);
+		this.requestRender();
+		return { handled: true, render: true };
+	}
 
-	private renderCost(cost: CostView, barW: number, inner: number, push: (line: string) => void): void {
-		const swatch = (p: CostProvider) => fg(p.color, "■");
-		const multiple = (m: number) => fg(m >= 1 ? C.green : C.rose, bold(`${m.toFixed(1)}×`));
-		const noZeros = (n: number) => money(n).replace(".00", "");
+	invalidate(): void { this.scroll.invalidate(); }
 
-		const overall = cost.plansTotal > 0 ? Math.round((cost.total / cost.plansTotal) * 10) / 10 : undefined;
-		const headline =
-			`    ${fg(C.text, bold(money(cost.total)))}  ${fg(C.muted, "at API prices")}` +
-			(overall === undefined ? "" : `  ${fg(C.subtle, "·")}  ${multiple(overall)} ${fg(C.muted, `your ${noZeros(cost.plansTotal)} of plans`)}`);
-
-		const nameW = Math.max(...cost.providers.map((p) => p.name.length));
-		const legend: string[] = [];
-		for (const p of cost.providers) {
-			const plan = p.plan ? `  ${multiple(p.multiple ?? 0)} ${fg(C.muted, `of ${noZeros(p.plan)} plan`)}` : "";
-			legend.push(`    ${swatch(p)} ${fg(C.text, p.name.padEnd(nameW))}  ${fg(p.color, money(p.total).padStart(9))}  ${fg(C.subtle, `${Math.round(p.share)}%`.padStart(4))}${plan}`);
-			if (p.models.length > 1) {
-				legend.push(`      ${fg(C.subtle, p.models.slice(0, 3).map((m) => `${m.model} ${money(m.total)}`).join("  ·  "))}`);
-			}
+	private renderCost(cost: CostView, width: number, push: (line: string) => void): void {
+		push(pair(fg(C.text, "30-day API value"), fg(C.text, bold(money(cost.total))), width));
+		push(stackedBar(cost.providers.map(p => ({ value: p.total, color: p.color })), width, C.track));
+		// A compact key, not another table repeating totals, shares and plan prices.
+		const live = cost.providers.filter(p => p.total > 0);
+		let legend = "";
+		for (const p of live.length ? live : cost.providers) {
+			const label = `${fg(p.color, "■")} ${fg(C.muted, p.name)}`;
+			const value = fg(C.text, money(p.total));
+			const entry = `${label} ${value}`;
+			if (legend && visibleWidth(legend) + 4 + visibleWidth(entry) > width) { push(legend); legend = ""; }
+			if (visibleWidth(entry) > width) { push(pair(label, value, width)); continue; }
+			legend += (legend ? "    " : "") + entry;
 		}
+		if (legend) push(legend);
+		if (!this.details || !cost.providers.length) return;
 
-		// The bar spans the text above and below it: at least as wide as the quota bars, at most the modal.
-		const textW = Math.max(...[headline, ...legend].map((l) => visibleWidth(l))) - 4;
-		const avail = Math.max(barW, Math.min(textW, inner - 8));
-
-		push(headline);
 		push("");
-		push(`    ${stackedBar(cost.providers.map((p) => ({ value: p.total, color: p.color })), avail, C.track)}`);
-		for (const l of legend) push(l);
+		if (cost.plansTotal > 0) push(pair(fg(C.muted, "Combined configured plan value"),
+			fg(C.muted, `${(cost.total / cost.plansTotal).toFixed(1)}× of ${money(cost.plansTotal).replace(".00", "")}/month`), width));
+		for (const p of cost.providers) {
+			push(pair(`${fg(p.color, "■")} ${fg(C.text, p.name)}`, fg(C.text, money(p.total)), width));
+			if (p.plan) push(pair(fg(C.muted, "  Configured plan value"), fg(C.muted, `${(p.multiple ?? 0).toFixed(1)}× of ${money(p.plan).replace(".00", "")}`), width));
+			for (const model of p.models.slice(0, 3)) push(pair(fg(C.muted, `  ${model.model}`), fg(C.muted, money(model.total)), width));
+			if (p.models.length > 3) push(fg(C.subtle, `  ${p.models.length - 3} more models`));
+		}
 		push("");
-
 		const days = cost.providers[0]!.daily.length;
-		const chart = columnChart(
-			cost.providers.map((p) => ({ color: p.color, daily: p.daily })),
-			{ height: 4, colWidth: avail >= days * 2 ? 2 : 1, width: avail, track: C.track },
-		);
-		chart.rows.forEach((line, i) => push(`    ${line}${i === 0 ? `  ${fg(C.subtle, `peak ${money(chart.peak)}/day`)}` : ""}`));
-		const span = visibleWidth(chart.rows[0] ?? "");
-		const left = `${chart.shown}d ago`;
-		push(`    ${fg(C.subtle, left + " ".repeat(Math.max(1, span - left.length - 3)) + "now")}`);
-		push(`    ${fg(C.subtle, "Excludes subagent and /btw calls.")}`);
+		const chart = columnChart(cost.providers.map(p => ({ color: p.color, daily: p.daily })),
+			{ height: 4, colWidth: width >= days * 2 ? 2 : 1, width, track: C.track });
+		push(pair(fg(C.muted, "Daily API value"), fg(C.muted, `peak ${money(chart.peak)}/day`), width));
+		chart.rows.forEach(push);
+		push(pair(fg(C.subtle, `${chart.shown}d ago`), fg(C.subtle, "now"), visibleWidth(chart.rows[0] ?? "")));
 	}
 
 	render(width: number): string[] {
-		const inner = Math.max(10, width - 2);
-		const edge = (s: string) => fg(C.rose, s);
+		if (width < 4) return [truncateToWidth("Usage", Math.max(0, width))];
+		const inner = width - 2;
+		const edge = (s: string) => fg(C.track, s);
 		const row = (content: string) => {
 			const t = truncateToWidth(content, inner);
 			return edge("│") + t + " ".repeat(Math.max(0, inner - visibleWidth(t))) + edge("│");
 		};
-		const title = ` ${bold("Usage")} `;
-		const lines: string[] = [edge("╭─") + fg(C.rose, title) + edge("─".repeat(Math.max(0, inner - 1 - visibleWidth(title))) + "╮")];
-		lines.push(row(""));
-
-		const labelW = Math.min(
-			16,
-			Math.max(4, ...this.sections.flatMap((s) => s.wins.map((w) => w.label.length))),
-		);
-		const barW = Math.max(8, Math.min(30, inner - labelW - 48));
-
-		for (const s of this.sections) {
-			const plan = s.plan ? fg(C.muted, `  ·  ${s.plan}`) : "";
-			lines.push(row(`  ${fg(C.blue, bold(s.name))}${plan}`));
-			if (s.loading) lines.push(row(`    ${fg(C.subtle, "fetching…")}`));
-			else if (s.error) lines.push(row(`    ${fg(C.pink, "✘")} ${fg(C.muted, s.error)}`));
-			else {
-				for (const w of s.wins) {
-					const pct = `${Math.round(w.used)}%`.padStart(4);
-					const tail = [w.note, fmtReset(w.resetsAt)].filter(Boolean).join("  ·  ");
-					lines.push(
-						row(`    ${fg(C.text, w.label.padEnd(labelW))} ${bar(w.used, barW)} ${fg(usageColor(w.used), pct)}  ${fg(C.subtle, tail)}`),
-					);
-				}
-				for (const e of s.extra) lines.push(row(`    ${fg(C.muted, e)}`));
-				if (s.cost) this.renderCost(s.cost, barW, inner, (l) => lines.push(row(l)));
-			}
-			lines.push(row(""));
+		const title = truncateToWidth(` ${bold(this.details ? "Usage details" : "Usage")} `, inner - 1);
+		const heading = edge("╭─") + fg(C.text, title) + edge("─".repeat(Math.max(0, inner - 1 - visibleWidth(title))) + "╮");
+		const cols = usageColumns(inner, this.sections.flatMap(s => s.wins.map(w => w.label)));
+		const body: string[] = [""];
+		const push = (line: string) => body.push(`  ${fit(line, cols.width)}`);
+		const note = (text: string) => {
+			if (cols.width) for (const line of wrapTextWithAnsi(fg(C.muted, text), cols.width)) push(line);
+		};
+		const date = (at: number) => new Date(at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+		const now = Date.now();
+		const lanes = (quota: string, value = "") => fit(quota, cols.quotaWidth) + "   " + fit(value, cols.valueWidth, true);
+		if (this.sections.some(s => s.name !== "API cost" && !s.cost)) {
+			const labels = fit("Subscription", cols.labelWidth) + " " + fit("Quota used", cols.barWidth + 5)
+				+ " ".repeat(cols.resetGap) + fit("Reset in", cols.resetWidth, true);
+			push(fg(C.muted, cols.split ? lanes(labels, "Weekly API value") : pair("Subscription / quota", "Weekly API value", cols.width)));
+			push("");
 		}
 
-		lines.push(row(`  ${fg(C.subtle, "r refresh  ·  esc close")}`));
-		lines.push(edge("╰" + "─".repeat(inner) + "╯"));
-		return lines;
+		for (const s of this.sections) {
+			if (s.name === "API cost" || s.cost) {
+				if (s.cost && !s.loading && !s.error) this.renderCost(s.cost, cols.width, push);
+				else {
+					push(pair(fg(C.text, "30-day API value"), s.loading ? fg(C.muted, "calculating…") : "", cols.width));
+					if (s.error) note(s.error);
+					for (const extra of s.extra) note(extra);
+				}
+				push("");
+				continue;
+			}
+
+			const weekly = s.weekly;
+			const ready = weekly?.status === "ready" && weekly.to > now ? weekly : undefined;
+			const amount = ready ? fg(C.text, bold(money(ready.total)))
+				: fg(C.muted, s.loading ? "…" : weekly?.status === "loading" ? "calculating…" : weekly || s.error ? "unavailable" : "—");
+			const since = ready ? fg(C.muted, `since ${date(ready.from)}`) : "";
+			const name = fg(C.text, bold(s.name)) + (s.plan ? `  ${fg(C.muted, s.plan)}` : "");
+			push(cols.split ? lanes(name, amount) : pair(name, amount, cols.width));
+
+			const quotaRows: string[] = [];
+			if (s.loading) quotaRows.push(fg(C.muted, "  fetching…"));
+			else if (s.error) quotaRows.push(...wrapTextWithAnsi(fg(C.muted, `  ${s.error}`), Math.max(1, cols.quotaWidth)));
+			else for (const w of s.wins) {
+				const reset = fmtReset(w.resetsAt, now).replace(/^resets in /, "");
+				const resetText = !reset ? "—" : reset === "resetting…" ? "now" : !cols.split ? `in ${reset}` : reset;
+				quotaRows.push(fg(C.muted, "  " + windowLabel(w.label, Math.max(0, cols.labelWidth - 2))) + " "
+					+ bar(w.used, cols.barWidth) + " " + fg(usageColor(w.used), `${Math.round(w.used)}%`.padStart(4))
+					+ " ".repeat(cols.resetGap) + fg(C.muted, fit(resetText, cols.resetWidth, true)));
+				if (w.note) quotaRows.push(fg(C.muted, `  ${w.note}`));
+			}
+			if (cols.split) {
+				if (!quotaRows.length && since) quotaRows.push("");
+				quotaRows.forEach((line, i) => push(lanes(line, i === 0 ? since : "")));
+			} else {
+				if (since) push(fit(since, cols.width, true));
+				quotaRows.forEach(line => push(line));
+			}
+			for (const extra of s.extra) note(extra);
+			if (this.details && ready) note(`Week ${date(ready.from)} to ${date(ready.to)} (local time)`);
+			else if (this.details && weekly && weekly.status !== "loading") note(weekly.status === "unavailable" ? weekly.reason : "weekly reset passed; press r to refresh");
+			push("");
+		}
+		if (this.details) {
+			note("Weekly values use each subscription's own reset period, not the calendar week.");
+			note("Not extra charges. Excludes subagent and /btw calls.");
+		}
+
+		this.content = body.map(line => truncateToWidth(line, inner));
+		const bodyHeight = Math.max(1, Math.floor(this.maxHeight()) - 4);
+		this.scroll.updateLayout(body.length, bodyHeight, this.requestRender);
+		const start = this.scroll.scrollTop;
+		const shown = this.scroll.render(inner).slice(start, start + bodyHeight);
+		const overflowing = body.length > bodyHeight;
+		const controls = `esc close · d ${this.details ? "less" : "details"} · r refresh${overflowing ? " · ↑↓ scroll" : ""}`;
+		return [heading, ...shown.map(row), row(`  ${fg(C.subtle, "API-equivalent · saved Pi sessions only")}`),
+			row(`  ${fg(C.muted, controls)}`), edge("╰" + "─".repeat(inner) + "╯")];
 	}
+}
+
+export interface UsageSource {
+	name: string;
+	fetch: () => Promise<Partial<Section>>;
+	providerIds: string[];
+}
+
+/** Independent quota requests; publish bars first, then attach exact-window costs from the warmed session cache. */
+export async function refreshUsageSections(
+	sections: Section[], sources: UsageSource[],
+	options: { isCurrent: () => boolean; onChange: () => void; readHistory?: typeof readSpend; now?: () => number; dir?: string },
+): Promise<void> {
+	if (!options.isCurrent()) return;
+	const dir = options.dir ?? join(PI_DIR, "sessions");
+	const now = (options.now ?? Date.now)();
+	const reader = options.readHistory ?? readSpend;
+	sections.splice(0, sections.length, ...[...sources.map(s => s.name), "API cost"].map(name => ({ name, wins: [], extra: [], loading: true })));
+	options.onChange();
+	const publish = (index: number, section: Section) => {
+		if (!options.isCurrent()) return;
+		sections[index] = section;
+		options.onChange();
+	};
+	const failure = (name: string, e: unknown): Section => ({ name, wins: [], extra: [], loading: false, error: e instanceof Error ? e.message : String(e) });
+	const history = Promise.resolve().then(() => reader({ dir, now: () => now }));
+	const cost = fetchSpend(history).then(
+		result => publish(sources.length, { name: "API cost", wins: [], extra: [], ...result, loading: false }),
+		error => publish(sources.length, failure("API cost", error)),
+	);
+	await Promise.all([cost, ...sources.map(async (source, index) => {
+		try {
+			const result = await source.fetch();
+			if (!options.isCurrent()) return;
+			const section: Section = { name: source.name, wins: [], extra: [], ...result, weekly: { status: "loading" }, loading: false };
+			publish(index, section);
+			await history.catch(() => undefined); // avoid concurrently parsing the same session files
+			if (!options.isCurrent()) return;
+			const asOf = (options.now ?? Date.now)();
+			const weekly = await readWeeklyCost(section.wins, source.providerIds, dir, asOf, reader);
+			publish(index, { ...section, weekly });
+		} catch (error) { publish(index, failure(source.name, error)); }
+	})]);
 }
 
 // ---------- command ----------
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("usage", {
-		description: "Show Anthropic, Codex and Antigravity subscription usage and 30-day spend",
+		description: "Show subscription bars, API-equivalent cost since each weekly reset, and 30-day spend",
 		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) return;
+			if (!ctx.hasUI || ctx.mode !== "tui") return;
 
-			const providers: { name: string; fetch: () => Promise<Partial<Section>> }[] = [
-				{ name: "Anthropic", fetch: fetchAnthropic },
-				{ name: "Codex", fetch: fetchCodex },
-				{ name: "Antigravity", fetch: fetchAntigravity },
-				{ name: "API cost", fetch: fetchSpend },
+			const providers: UsageSource[] = [
+				{ name: "Anthropic", fetch: fetchAnthropic, providerIds: ["anthropic"] },
+				{ name: "Codex", fetch: fetchCodex, providerIds: ["openai", "openai-codex"] },
+				{ name: "Antigravity", fetch: fetchAntigravity, providerIds: ["google-antigravity", "antigravity"] },
 			];
-			const sections: Section[] = providers.map((p) => ({ name: p.name, wins: [], extra: [], loading: true }));
+			const sections: Section[] = [];
 			let generation = 0;
 			let closed = false;
+			let refreshing = false;
 
 			await ctx.ui.custom<void>(
 				(tui, _theme, _kb, done) => {
 					const load = () => {
+						if (closed || refreshing) return; // don't duplicate network requests or session scans on repeated r
+						refreshing = true;
 						const gen = ++generation;
-						providers.forEach((p, i) => {
-							sections[i] = { name: p.name, wins: [], extra: [], loading: true };
-							p.fetch().then(
-								(r) => {
-									if (gen === generation) sections[i] = { name: p.name, wins: [], extra: [], ...r, loading: false };
-								},
-								(e) => {
-									if (gen === generation) sections[i] = { name: p.name, wins: [], extra: [], loading: false, error: e instanceof Error ? e.message : String(e) };
-								},
-							).finally(() => {
-								if (!closed) tui.requestRender();
-							});
-						});
-						tui.requestRender();
+						void refreshUsageSections(sections, providers, {
+							isCurrent: () => !closed && gen === generation,
+							onChange: () => tui.requestRender(),
+						}).catch(error => {
+							if (!closed) ctx.ui.notify(`Usage refresh failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+						}).finally(() => { refreshing = false; });
 					};
 					const view = new UsageView(sections, load, () => {
 						closed = true;
 						done();
-					});
+					}, () => tui.requestRender(), () => Math.max(5, Math.floor(tui.terminal.rows * 0.9)));
 					load();
 					return view;
 				},

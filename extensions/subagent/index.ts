@@ -38,6 +38,8 @@ const DEFAULT_MODEL = "openai/gpt-6-luna"; // GPT-6 Luna, 900K context (see mode
 const DEFAULT_THINKING = "high";
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
+const CODE_DISCOVERY_GUIDANCE =
+	"For code discovery, start with Semble when available: find implementations by behavior, concept, or unfamiliar symbol, then read the returned source locations. Read known file paths directly. Use rg/grep for exact strings, errors, exhaustive references, and follow-up checks; all tools remain allowed. If Semble is unavailable or insufficient, continue with other search tools.";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -314,8 +316,9 @@ async function runSingleAgent(
 	};
 
 	try {
-		if (spec.prompt?.trim()) {
-			const tmp = await writePromptToTempFile(label, spec.prompt);
+		{
+			const prompt = [spec.prompt?.trim(), CODE_DISCOVERY_GUIDANCE].filter(Boolean).join("\n\n");
+			const tmp = await writePromptToTempFile(label, prompt);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
 			args.push("--append-system-prompt", tmpPromptPath);
@@ -458,7 +461,7 @@ const specFields = {
 		}),
 	),
 	tools: Type.Optional(
-		Type.String({ description: 'Comma-separated tool allowlist, e.g. "read,grep,find,ls" (read-only). Default: pi default tools.' }),
+		Type.String({ description: 'Comma-separated tool allowlist, e.g. "read,grep,find,ls" (read-only). Default: pi default tools. Start code discovery with Semble when available; grep is useful for exact matches and reference checks.' }),
 	),
 	model: Type.Optional(Type.String({ description: `Model as provider/id. Default: ${DEFAULT_MODEL} (900K context).` })),
 	thinking: Type.Optional(
@@ -529,7 +532,7 @@ export default function (pi: ExtensionAPI) {
 			"Parallel: { tasks: [{ task, prompt?, ... }, ...] } (max 8, 4 at a time).",
 			"Chain: { chain: [{ task: '... {previous} ...', prompt?, ... }, ...] }.",
 			`Default model is ${DEFAULT_MODEL} (900K context) with ${DEFAULT_THINKING} thinking; override per subagent only when needed.`,
-			"Use tools to restrict a subagent (e.g. \"read,grep,find,ls\" for read-only research). Subagents do not see this conversation, so put all needed context in task.",
+			"Use tools to restrict a subagent (e.g. \"read,grep,find,ls\" for read-only research). Start code discovery with Semble when available, then read the returned locations; use grep for exact matches and reference checks. Subagents do not see this conversation, so put all needed context in task.",
 		].join(" "),
 		parameters: SubagentParams,
 
