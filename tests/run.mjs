@@ -3,6 +3,7 @@ import { createTestLoader } from "./pi-runtime.mjs";
 
 const suites = {
   semble: "./semble-setup.test.mjs",
+  exa: "../extensions/exa/tests/exa.test.ts",
   btw: "../extensions/btw/tests/btw.test.ts",
   "oxo-ui": "../extensions/oxo-ui/tests/rolling-tps.test.ts",
   "paste-fold": "../extensions/paste-fold/tests/paste-fold.test.ts",

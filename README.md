@@ -51,7 +51,7 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 | [notifications](extensions/notifications) | Send macOS notifications when Pi needs attention while you're away. |
 | [oxo-ui](extensions/oxo-ui) | Style the input and footer with cost, context usage, and tokens/sec. |
 | [paste-fold](extensions/paste-fold) | Collapse long pastes in the editor without changing their text. |
-| [searxng](extensions/searxng) | Search the web through a local SearXNG server. |
+| [exa](extensions/exa) | Search the web through Exa Auto, with source URLs and page highlights. No local search server. |
 | [sessions](extensions/sessions) | Switch project sessions with `/sessions`. |
 | [subagent](extensions/subagent) | Run subagents; watch or stop them with `/agents` or `Ctrl+Shift+A`. |
 | [todo-widget](extensions/todo-widget) | Show live todo progress; expand it with `Ctrl+Shift+E`. |
@@ -90,7 +90,23 @@ To remove Semble's MCP entry, run `semble uninstall --agent pi --type mcp --yes`
 
 ### Web search
 
-For web search, run a [SearXNG server](https://docs.searxng.org/admin/installation.html) with JSON results enabled. The default URL is `http://127.0.0.1:8888`; set `SEARXNG_URL` to change it. `bin/start-search-runtime` starts an existing Colima and `pi-searxng` container setup.
+Web search uses the hosted [Exa API](https://exa.ai/). Create an API key in your Exa dashboard, then run this in your own terminal:
+
+```bash
+python3 "$REPO/bin/setup-exa-key.py"
+```
+
+Paste the key at the hidden-input prompt, not into Pi chat. The command saves it outside the repository at `~/.pi/agent/secrets/exa-api-key` with owner-only permissions. This is a local plaintext secret file, not encrypted storage. `PI_CODING_AGENT_DIR` overrides the agent directory; an exported `EXA_API_KEY` takes precedence over the file. Never commit or print credentials.
+
+Run `/reload` in Pi after installation. The existing `web_search` tool and its `query`/`limit` arguments stay the same. Requests use `/search`, Auto mode, and content highlights; the result limit defaults to five and is capped at ten. There are no automatic retries or local background processes. For a CLI smoke test, run `node "$REPO/skills/exa-search/scripts/search.mjs" "Node.js documentation"` (one billable search).
+
+The upstream API integration skill is useful when changing the Exa implementation:
+
+```bash
+npx skills add exa-labs/agent-skills --skill build-with-exa --agent pi --global --yes
+```
+
+If your Pi settings use a skill allowlist, enable `exa-search` and `build-with-exa` there and remove the old `searxng-search` entry. The SearXNG backend is no longer used. Once Exa works, disable any old SearXNG startup LaunchAgent and stop the `pi-searxng` container. Stop Colima only if nothing else uses it; `bin/start-search-runtime` is a legacy SearXNG helper and should not be run for Exa.
 
 For `Cmd+V` image paste in Ghostty 1.3+, add these bindings and reload Ghostty with `Cmd+Shift+,`:
 
