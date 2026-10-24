@@ -106,7 +106,7 @@ The upstream API integration skill is useful when changing the Exa implementatio
 npx skills add exa-labs/agent-skills --skill build-with-exa --agent pi --global --yes
 ```
 
-If your Pi settings use a skill allowlist, enable `exa-search` and `build-with-exa` there and remove the old `searxng-search` entry. The SearXNG backend is no longer used. Once Exa works, disable any old SearXNG startup LaunchAgent and stop the `pi-searxng` container. Stop Colima only if nothing else uses it; `bin/start-search-runtime` is a legacy SearXNG helper and should not be run for Exa.
+If your Pi settings use a skill allowlist, enable `exa-search` and `build-with-exa` there and remove the old `searxng-search` entry. The old SearXNG backend has been removed.
 
 For `Cmd+V` image paste in Ghostty 1.3+, add these bindings and reload Ghostty with `Cmd+Shift+,`:
 
@@ -114,6 +114,12 @@ For `Cmd+V` image paste in Ghostty 1.3+, add these bindings and reload Ghostty w
 keybind = super+v=paste_from_clipboard
 keybind = chain=text:\x1b[200~\x1b[201~
 ```
+
+### Study notes skill
+
+`skills/source-to-study-notes/SKILL.md` turns lecture slides, PDFs, and assigned readings into full Markdown learning notes plus a short recap. It checks source coverage and versions, follows existing course-note conventions, and leaves teaching for a separate step.
+
+The install symlink makes the tracked skill available at `~/.pi/agent/skills/source-to-study-notes/SKILL.md` too. If your local settings use a skill allowlist (`"!**"`), add `"+/Users/veer/.pi/agent/skills/source-to-study-notes/SKILL.md"` to `skills`, adjusting the home path on another machine. Run `/reload`, then use `/skill:source-to-study-notes`.
 
 ## Tests
 
