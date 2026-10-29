@@ -56,7 +56,7 @@ Computer use needs Accessibility and Screen Recording permissions for `~/Applica
 | [subagent](extensions/subagent) | Run subagents; watch or stop them with `/agents` or `Ctrl+Shift+A`. |
 | [todo-widget](extensions/todo-widget) | Show live todo progress; expand it with `Ctrl+Shift+E`. |
 | [todos](extensions/todos) | Manage project tasks with `/todos` and the agent's `todo` tool. |
-| [usage](extensions/usage) | Show quota bars, API-equivalent cost since each weekly reset, and 30-day spend with `/usage`; `d` toggles details. |
+| [usage](extensions/usage) | `/usage` opens Limits and Spend tabs: quotas, all-time tokens, 7/30/60-day costs, cache analytics and model details. Tab switches views; `d` expands details. |
 | [user-bar](extensions/user-bar) | Style sent messages, fold long ones, and add copy/edit/fork actions. |
 | [working-verbs](extensions/working-verbs) | Show the agent's current activity above the input. |
 | [pi-anthropic-auth](https://www.npmjs.com/package/@gotgenes/pi-anthropic-auth) | Add Anthropic login support. |

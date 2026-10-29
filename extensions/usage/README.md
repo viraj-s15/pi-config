@@ -1,69 +1,93 @@
 # Usage modal
 
-Run `/usage` after `/reload`.
+Run `/usage` after `/reload`. One modal has two tabs, **Limits** and **Spend**. Tab or Shift-Tab switches between them without closing the modal.
 
-The modal is a fixed-column usage meter, not a stack of cost annotations. Every subscription keeps its quota bars. Dollar amounts share a right edge in a separate weekly API-value lane:
+## Limits
+
+The default tab shows subscription quota bars for Anthropic, Codex and Antigravity: window, percent **used**, and time until reset. There are no costs on this tab. Press `d` to show or hide absolute reset dates in local time. This toggle is independent of Spend details. Providers load independently; one failed request does not hide the others.
+
+## Spend
+
+Spend opens on a deliberately compact overview, designed for a 76-column modal and no more than 22 body rows with normal data. It shows:
+
+- The exact all-time processed token count once. No session response count is shown on the overview.
+- A single-line picker for rolling **7 days, 30 days, 60 days, and all time**.
+- One selected-period cost and abbreviated token-volume summary.
+- Four compact count-and-cost rows: uncached input, cache reads, cache writes, and output.
+- One cache summary with hit rate and estimated savings.
+
+The overview has no rainbow token-share bar, provider rows, or charts. Press `d` to replace the overview body with **Models & history**; it does not append details below the overview. That view retains provider and model rows with token shares, daily token and cost charts, exact category counts, subscription-aligned weekly costs, and accounting notes. Only in this details view is the recorded response count shown, for the selected period.
+
+Use **Left/Right** or **1/2/3/4** to select 7 days / 30 days / 60 days / all time. The default is 30 days. Changing periods returns the body to the top.
+
+Illustrative compact overview (not live values):
 
 ```text
-Subscription    Quota used           Reset in     Weekly API value
-Anthropic                                                   $23.45
-  5h            █████░░░░░  50%        2h 10m  since Oct 14, 09:00
-  7d            ███████░░░  70%        3d 4h
-
-Codex                                                       $12.08
-  5h            ███░░░░░░░  30%        1h 05m  since Oct 15, 11:30
-  7d            ████░░░░░░  40%        2d 8h
-
-30-day API value                                            $48.20
-█████████████████████████████████████████████████████████████████
-■ Anthropic $23.45    ■ OpenAI $24.75
+╭─ Usage ───────────────────────────────────────────────────────────────╮
+│    Limits       [ Spend ]                                            │
+├───────────────────────────────────────────────────────────────────────┤
+│  1,440,000,000 tokens all time                                        │
+│                                                                       │
+│   7 days   [30 days]   60 days   All time                             │
+│                                                                       │
+│  $101.90                                           400.00M tokens     │
+│  API-equivalent cost                                last 30 days      │
+│                                                                       │
+│  Uncached input                          10.00M             $20.00   │
+│  Cache read                             380.00M             $60.00   │
+│  Cache write                              8.00M             $12.00   │
+│  Output                                   2.00M              $9.90   │
+│                                                                       │
+│  Cache hit 95.5%                         Est. saved $700.00            │
+│  API-equivalent USD · Pi history                ←→ period              │
+│  tab switch · d models & history · r refresh · esc close              │
+╰───────────────────────────────────────────────────────────────────────╯
 ```
-
-The example is illustrative, not live account data. Amounts are USD at API-equivalent prices recorded in saved Pi sessions, not additional subscription charges or a provider invoice. Weekly values have provider-specific periods; they are not synchronized calendar-week totals.
 
 ## Controls
 
-- `d`: show/hide model-level cost breakdowns, configured plan value multiples, daily history and full reset details.
-- `r`: refresh quotas and costs. Repeated presses during an active refresh do not launch duplicate requests.
-- `↑` / `↓`, `j` / `k`, `Page Up` / `Page Down`, `Home` / `End`: scroll when necessary. Mouse-wheel scrolling is supported in fullscreen mode.
-- `Esc`, `q`, `Enter`: close.
+Controls are context-specific: Left/Right and 1–4 change the period only on Spend; `d` toggles Spend's Models & history body on Spend, and reset-date details on Limits. These two `d` states are independent.
 
-The scope note and controls remain pinned on short terminals. Below the two-column breakpoint, each provider's amount stays right-aligned in its heading, its period moves below it, and quota bars use the full content width. No squeezed side-by-side panels. Long model-group labels retain their window suffix, and wide characters do not shift the numeric columns.
+| Key | Action |
+| --- | --- |
+| Tab / Shift-Tab | Switch Limits / Spend |
+| Left / Right | Change Spend period |
+| 1 / 2 / 3 / 4 | Select 7 days / 30 days / 60 days / all time on Spend |
+| d | Toggle Spend Models & history / return to overview, or Limits reset dates |
+| r | Refresh limits and history; repeated presses during refresh do not duplicate requests |
+| Up / Down, j / k | Scroll |
+| Page Up / Page Down, Home / End | Scroll a page or jump to an edge |
+| Esc / q / Enter | Close |
 
-## Design research and decisions
+Fullscreen mouse-wheel scrolling is supported. Tab navigation, scope and controls remain pinned while the body scrolls. Switching tabs or changing periods returns the body to the top. Columns use visible terminal widths, preserving alignment for ANSI colors and wide characters. Narrow terminals keep one full-width body rather than squeezed side-by-side cards.
 
-The earlier free-form layout put bars, percentages, countdown sentences and cost annotations into successive rows without stable columns. Hiding details reduced density but did not solve the organization problem.
+## Accounting
 
-Three directly relevant examples informed the redesign:
+**API-equivalent value is not your invoice or an additional subscription charge.** Costs come from usage recorded in saved Pi sessions. This is not a cross-client usage importer: Claude Code, Codex CLI, T3 Code and other clients' histories are not read. Deleted history and unrecorded nested/subagent or `/btw` calls are not reconstructed.
 
-- [Vercel AI Gateway budgets](https://vercel.com/docs/ai-gateway/observability-and-spend/budgets) pair scoped usage bars with spend and limits for a defined period. Here, capacity and monetary value belong together by provider, but in distinct lanes.
-- [Cursor usage and limits](https://cursor.com/help/models-and-usage/usage-limits) distinguish quota/reset information from monetary usage and charges. Here, API-equivalent values must not be presented as actual bills or a dollar allowance.
-- [Claude Code Usage Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) separates realtime meter views from daily/monthly analysis. Here, the daily cost chart and model breakdown remain behind `d` rather than competing with the initial quota view.
+- All time scans all available `.jsonl` history, including old files. The 7/30/60-day periods are rolling 24-hour windows, not calendar weeks/months. Records exactly at a rolling cutoff have rolled off; future records are excluded.
+- Processed tokens = uncached input + cache reads + cache writes + output. Pi's `input` already excludes cache reads; `totalTokens` is not added again. Output includes reasoning where the provider reports it as output. Token totals describe processed volume across requests, not unique words or context size.
+- Cache hit rate = cache reads / (uncached input + cache reads + cache writes).
+- Estimated cache savings compare cache reads with the **same response's** recorded uncached input rate, subtracting its recorded cache-read cost. Records with no nonzero uncached-input token count or missing comparable costs are excluded and their token coverage is shown. No current rate card or invented historical price is substituted. This estimate is not a measured invoice discount.
+- Valid token usage without cost is counted and marked **unpriced**. Known API costs remain a subtotal, not a claim that those unpriced requests were free. Legacy records with a total but no per-category prices are flagged; category sums can be lower than the total.
+- Unreadable history is marked **partial**, never silently presented as complete zero usage. A readable empty period genuinely has zero recorded usage. Sub-cent values retain extra precision.
+- Forked copies of responses are deduplicated by provider/response ID, or by entry ID/timestamp when response IDs are absent. Provider rows reflect stored provider IDs, not verified billing accounts.
+- Daily charts use rolling 24-hour buckets, oldest first. On all time, charts show the latest 60 days while totals include all history. At narrow widths, only the latest days that fit are charted; the chart caption states the displayed span.
 
-Alternatives considered: a free-form cost line beneath each provider (rejected after user feedback), one dense table row per quota window (duplicates a provider's weekly amount or implies cost belongs to one model bucket), selected-provider tabs (hide cross-provider status), and a shared quota grid with a provider-level value lane (chosen).
+### Subscription weeks
 
-### Visual system
+The Spend detail view also retains exact subscription-aligned weekly costs. These are separate from the global rolling 7-day summary:
 
-- **Palette:** text `#DDE1E6`, secondary text `#8D9199`, quiet outline/track `#33353B`, available quota `#08BDBA`, high usage `#EE5396`, cost-series blue `#33B1FF`. Existing warning and provider-series colors are retained; no new palette or decorative cards.
-- **Type:** inherit the terminal's monospace font. Align by visible terminal columns, not string length. Bold provider names and dollar amounts; keep captions and dates muted.
-- **Layout:** subscription/window labels, bars/percentages, reset countdowns, and weekly API values occupy stable lanes. Monetary values are right-aligned. One blank row separates actual provider groups; there are no per-provider boxes.
-- **Restraint:** use `Reset in` once as a column heading rather than repeating a sentence per bar. Use `Weekly API value` once rather than repeating a cost label. The 30-day summary is a separate full-width share bar with one compact key, not a second nested table.
-- **Honest scales:** quota bars use provider-reported percentages. The 30-day stacked bar shows the distribution of recorded monetary value across providers. API-equivalent value is never divided by the subscription price and drawn as a dollar-limit meter: there is no trustworthy API-dollar allowance denominator.
+- A subscription week begins at its next reset timestamp minus its declared seven-day duration.
+- Anthropic uses its overall seven-day bucket, not an Opus/Sonnet-only cap. Codex must report an actual 604800-second window; a fallback `7d` label alone does not establish a trustworthy interval.
+- Antigravity model groups with missing or different resets cannot be combined into one subscription week. Direct Google API usage is not attributed to Antigravity.
+- These intervals include their start and exclude their end. Missing/expired/ambiguous resets or unreadable history show **unavailable**, not a zero-dollar week. Dates are local; arithmetic uses absolute timestamps.
 
-The plan was reviewed against the brief before implementation: provider cards and more charts would recreate dashboard clutter. The deliberate choice is one quiet terminal grid, keeping the existing bars as the primary visual element. Layout tests verify amount right edges, percentage columns, full-width cost bars, narrow stacking, and long labels. Actual compact/wide/narrow terminal renderings are reviewed before handoff.
+## Design
 
-## Accounting rules
+The two tabs separate live capacity from historical accounting, following the supplied T3 references without copying their three-tab web layout. The modal inherits the terminal's monospace font. The compact overview uses text `#DDE1E6`, muted text `#8D9199`, track `#33353B`, selection `#33B1FF`, and cache summary `#08BDBA`. It avoids the earlier dense repeated period/category/provider tables, accents on every metric, and inflated modal. More boxes/cards and a dashboard layout were rejected; competing charts do not appear together on the overview. Detailed model/provider coloring and charts remain in Models & history. Limits gets the full width for quota bars.
 
-- A week begins at the provider's next reset timestamp minus its declared seven-day window, not Monday, midnight, or seven days before opening the modal.
-- Anthropic's overall `seven_day` bucket supplies its reset; model-only Opus/Sonnet caps do not substitute for a missing overall bucket.
-- Codex must report an actual `limit_window_seconds` of 604800. A fallback label of `7d` alone is not enough to assert an interval.
-- Antigravity's model groups may reset independently. Different or missing weekly reset timestamps mean there is no single trustworthy subscription interval, so the amount is unavailable. Direct Google API records are not attributed to Antigravity.
-- Totals include records at the interval start and exclude its end and future-dated records. Forked copies of the same recorded response are deduplicated.
-- Missing/expired reset metadata or unreadable session history shows **unavailable**, not `$0.00`. A valid, readable window with no recorded matching charges can genuinely show `$0.00`.
-- Reset dates are displayed in local time; interval arithmetic uses absolute timestamps, including across daylight-saving transitions.
-- Totals are grouped by saved provider IDs, not verified billing account identity. They exclude activity in other clients, deleted/unrecorded history, and the subagent and `/btw` calls not represented by the existing spend reader. The detail view's plan multiples use the manually configured monthly prices in `index.ts`.
-
-Session parsing is cached until file size/mtime changes. Weekly queries use exact message timestamps, even if files have preserved older mtimes; they still walk/stat the session files on refresh. Quotas appear as soon as their requests finish, without waiting for cost scanning. Closing the modal prevents later results from updating it.
+Session parsing is cached by file size/mtime. One scan produces all four global periods, and weekly queries reuse the parsed records. Quotas publish as their requests finish; closing the modal prevents late results from updating it.
 
 ## Tests
 
@@ -71,4 +95,4 @@ Session parsing is cached until file size/mtime changes. Weekly queries use exac
 node tests/run.mjs usage
 ```
 
-Coverage includes all three quota payload parsers, precise interval bounds, provider-specific resets, missing and ambiguous windows, duplicate responses, unreadable history, compact/detail rendering, aligned columns, narrow and short terminals, wide-character labels, scroll/close/refresh controls, and stale refresh results.
+Tests cover quota parsing/auth, token and cache-cost accounting, savings coverage, daily buckets, historical windows, forks, missing prices/history, provider-specific weekly resets, tab/period/detail navigation, scrolling and pinned chrome, ANSI/wide-character alignment, narrow/short terminal bounds, resize, and independent/stale refreshes.

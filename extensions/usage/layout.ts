@@ -18,12 +18,13 @@ export function pair(left: string, right: string, width: number, gap = 2): strin
 
 export function usageColumns(inner: number, labels: string[]) {
 	const width = Math.max(0, inner - 4); // two spaces of inset on each side
-	const split = width >= 80;
-	const valueWidth = split ? 22 : 0;
-	const quotaWidth = split ? width - valueWidth - 3 : width;
-	const resetWidth = split ? 10 : 13;
+	// Limits owns the full content width; monetary analytics live on the Spend tab.
+	const split = false;
+	const valueWidth = 0;
+	const quotaWidth = width;
+	const resetWidth = 13;
 	const labelWidth = Math.max(0, Math.min(18, Math.max(14, ...labels.map(s => visibleWidth(s) + 2)), quotaWidth - resetWidth - 10));
-	const barWidth = Math.max(0, Math.min(24, quotaWidth - labelWidth - resetWidth - 8));
+	const barWidth = Math.max(0, quotaWidth - labelWidth - resetWidth - 8);
 	const resetGap = Math.max(2, quotaWidth - labelWidth - barWidth - 6 - resetWidth);
 	return { width, split, valueWidth, quotaWidth, resetWidth, labelWidth, barWidth, resetGap };
 }

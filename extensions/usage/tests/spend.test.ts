@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { readSpend } from "../spend.ts";
+import { readSpend, readSpendReport } from "../spend.ts";
 import { readWeeklyCost, sumProviderSpend, weeklySpendRange, WEEK_SECONDS } from "../weekly-spend.ts";
 
 const DAY = 86_400_000;
@@ -30,6 +30,13 @@ const write = (dir: string, project: string, name: string, lines: string[]) => {
   writeFileSync(join(dir, project, name), lines.join("\n") + "\n");
 };
 const read = (dir: string) => readSpend({ dir, now: () => NOW });
+function usageMsg(usage: Record<string, unknown>, opts: { ago?: number; provider?: string; model?: string; responseId?: string } = {}) {
+  const ts = NOW - (opts.ago ?? 0);
+  return JSON.stringify({ id: `usage-${++seq}`, timestamp: new Date(ts).toISOString(), message: {
+    role: "assistant", provider: opts.provider ?? "openai", model: opts.model ?? "gpt-6.1-sol",
+    responseId: opts.responseId ?? `usage-resp-${seq}`, timestamp: ts, usage,
+  }});
+}
 
 test("sums assistant cost across all sessions and projects", async t => {
   const dir = sessions(t);
@@ -165,6 +172,91 @@ test("explicit from scans old-mtime files and supports inclusive exact timestamp
   const spend = await readSpend({ dir, from: NOW - 2 * DAY, to: NOW, now: () => NOW });
   assert.equal(spend.total, 5);
   assert.equal(spend.messages, 2);
+});
+
+test("counts token usage without cost and reports cache tokens and category costs", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    usageMsg({ input: 10, output: 4, cacheRead: 3, cacheWrite: 2 }),
+    usageMsg({ input: 20, output: 5, cacheRead: 7, cacheWrite: 1, cost: { input: 0, output: 0.5, cacheRead: 0.25, cacheWrite: 0, total: 0.75 } }, { provider: "anthropic", model: "claude", ago: DAY }),
+  ]);
+  const result = await read(dir);
+  assert.equal(result.messages, 2);
+  assert.equal(result.total, 0.75);
+  assert.deepEqual(result.metrics, {
+    tokens: { input: 30, output: 9, cacheRead: 10, cacheWrite: 3, total: 52 },
+    cost: { input: 0, output: 0.5, cacheRead: 0.25, cacheWrite: 0, total: 0.75 },
+    unpricedMessages: 1, missingBreakdownMessages: 0,
+    cacheSavings: { estimated: 0, coveredTokens: 7, unratedTokens: 3 },
+  });
+  const provider = result.byProvider[0]!;
+  assert.equal(provider.provider, "anthropic");
+  assert.equal(provider.metrics?.tokens.total, 33);
+  assert.deepEqual(provider.models[0]?.metrics, provider.metrics);
+});
+
+test("daily token buckets aggregate globally and per provider", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    usageMsg({ input: 2, output: 1, cacheRead: 3, cacheWrite: 4 }, { provider: "openai" }),
+    usageMsg({ input: 5, output: 1 }, { provider: "anthropic", ago: DAY + 1000 }),
+  ]);
+  const spend = await read(dir);
+  assert.equal(spend.dailyTokens?.[29], 10);
+  assert.equal(spend.dailyTokens?.[28], 6);
+  assert.equal(spend.byProvider.find(p => p.provider === "openai")?.dailyTokens?.[29], 10);
+  assert.equal(spend.byProvider.find(p => p.provider === "anthropic")?.dailyTokens?.[28], 6);
+});
+
+test("cache savings estimate priced tokens and leave incomplete pricing unrated", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    usageMsg({ input: 100, cacheRead: 50, cost: { input: 1, cacheRead: 0.2, total: 1.2 } }, { provider: "openai", model: "priced" }),
+    usageMsg({ input: 0, cacheRead: 7, cost: { input: 0, cacheRead: 0, total: 0 } }, { provider: "openai", model: "zero-input" }),
+    usageMsg({ input: 20, cacheRead: 3, cost: { input: 0.4, total: 0.4 } }, { provider: "anthropic", model: "missing-cache-rate" }),
+  ]);
+  const spend = await read(dir);
+  assert.deepEqual(spend.metrics?.cacheSavings, { estimated: 0.3, coveredTokens: 50, unratedTokens: 10 });
+  assert.deepEqual(spend.byProvider.find(p => p.provider === "openai")?.metrics?.cacheSavings,
+    { estimated: 0.3, coveredTokens: 50, unratedTokens: 7 });
+  assert.deepEqual(spend.byProvider.find(p => p.provider === "openai")?.models.find(m => m.model === "priced")?.metrics?.cacheSavings,
+    { estimated: 0.3, coveredTokens: 50, unratedTokens: 0 });
+  assert.deepEqual(spend.byProvider.find(p => p.provider === "anthropic")?.metrics?.cacheSavings,
+    { estimated: 0, coveredTokens: 0, unratedTokens: 3 });
+});
+
+test("distinguishes missing category costs from actual zero costs", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    usageMsg({ input: 1, cost: { total: 2 } }),
+    usageMsg({ output: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
+  ]);
+  const result = await read(dir);
+  assert.equal(result.metrics?.missingBreakdownMessages, 1);
+  assert.equal(result.metrics?.cost.total, 2);
+  assert.equal(result.metrics?.cost.input, 0);
+  assert.equal(result.metrics?.unpricedMessages, 0);
+});
+
+test("report summarizes all time and exact rolling 7/30/60-day boundaries in one API", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [
+    msg(1, { ago: 7 * DAY }), msg(2, { ago: 7 * DAY - 1 }),
+    msg(4, { ago: 30 * DAY }), msg(8, { ago: 30 * DAY - 1 }),
+    msg(16, { ago: 60 * DAY }), msg(32, { ago: 60 * DAY - 1 }),
+  ]);
+  const report = await readSpendReport({ dir, now: () => NOW });
+  assert.deepEqual([report.allTime.total, report.week.total, report.month.total, report.twoMonths.total], [63, 2, 11, 47]);
+  assert.deepEqual([report.week.days, report.month.days, report.twoMonths.days], [7, 30, 60]);
+});
+
+test("all-time report includes records in files with old mtimes", async t => {
+  const dir = sessions(t);
+  write(dir, "a", "1.jsonl", [msg(5, { ago: 90 * DAY })]);
+  utimesSync(join(dir, "a", "1.jsonl"), new Date(NOW - 100 * DAY), new Date(NOW - 100 * DAY));
+  const report = await readSpendReport({ dir, now: () => NOW });
+  assert.equal(report.allTime.total, 5);
+  assert.equal(report.twoMonths.total, 0);
 });
 
 test("weekly range requires exact, live seven-day metadata and prefers the general bucket", () => {
