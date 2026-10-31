@@ -299,24 +299,39 @@ export function installToolGrouping(): {
 	const current = state;
 	current.activeMessages ??= new Set();
 	current.opened ??= new WeakMap();
+	// Pi-Bolt's Container renders plain containers through renderShared (its TUI calls it directly and
+	// render() only forwards to it), so patching render alone is bypassed. Older pi-tui has only render.
+	const method: "render" | "renderShared" = typeof prototype.renderShared === "function" ? "renderShared" : "render";
+	const ownsChildren = (container: Container) => Object.prototype.hasOwnProperty.call(container, "children");
+	// Pi-Bolt's `children` accessor reports a change on every read and write, which would schedule a redraw
+	// each frame. Its backing array is `childList`; use that whenever it exists.
+	const readChildren = (container: Container): Component[] =>
+		"childList" in container && !ownsChildren(container) ? ((container as any).childList as Component[]) : container.children;
+	const writeChildren = (container: Container, children: Component[]) => {
+		if ("childList" in container && !ownsChildren(container)) (container as any).childList = children;
+		else container.children = children;
+	};
 	current.render = function (this: Container, width: number) {
-		if (!current.enabled || !this.children.some((child) => (isWork(child) && !(child instanceof Spacer)) || thinkingAnswer(child))) {
+		const originalChildren = readChildren(this);
+		if (!current.enabled || !originalChildren.some((child) => (isWork(child) && !(child instanceof Spacer)) || thinkingAnswer(child))) {
 			return current.original.call(this, width);
 		}
-		const originalChildren = this.children;
-		this.children = projectGroups(originalChildren, current);
+		writeChildren(this, projectGroups(originalChildren, current));
 		try {
 			return current.original.call(this, width);
 		} finally {
-			this.children = originalChildren;
+			writeChildren(this, originalChildren);
 		}
 	};
-	if (prototype.render !== current.wrapper) {
-		current.original = prototype.render;
+	// A wrapper left on the other method by an earlier load (e.g. render before this fix): put the real one back.
+	const otherMethod = method === "render" ? "renderShared" : "render";
+	if (state.wrapper && prototype[otherMethod] === state.wrapper) prototype[otherMethod] = state.original;
+	if (prototype[method] !== current.wrapper) {
+		current.original = prototype[method];
 		current.wrapper = function (this: Container, width: number) {
 			return current.render.call(this, width);
 		};
-		prototype.render = current.wrapper;
+		prototype[method] = current.wrapper;
 	}
 
 	return {
